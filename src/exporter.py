@@ -13,6 +13,107 @@ from .scraper import ScrapeResult
 
 OUTPUTS_DIR = Path("outputs")
 
+BREVO_COLUMNS = [
+    "EMAIL",
+    "EMPRESA",
+    "NOMBRE",
+    "APELLIDO",
+    "PROVINCIA",
+    "CIUDAD",
+    "TELEFONO",
+    "WEB",
+    "FUENTE_URL",
+    "FUENTE_URLS_ALL",
+    "TIPO_EMAIL",
+    "CONFIANZA",
+    "FUENTE_EMAIL",
+    "FECHA_CAPTURA",
+    "VERIFICATION_STATUS",
+    "VERIFICATION_PROVIDER",
+]
+
+ALLOWED_CANDIDATE_PREFIXES = {
+    "info",
+    "contacto",
+    "comercial",
+    "ventas",
+    "hola",
+    "administracion",
+}
+
+_MC_EMAIL_COLS = {
+    "email",
+    "e-mail",
+    "address",
+    "email address",
+    "emailaddress",
+    "correo",
+    "correo electronico",
+}
+_MC_STATUS_COLS = {
+    "result",
+    "status",
+    "state",
+    "verification status",
+    "verification_status",
+    "mailercheck status",
+    "mailercheck_status",
+}
+
+_MC_STATUS_MAP = {
+    "valid": "valid",
+    "ok": "valid",
+    "deliverable": "valid",
+    "invalid": "invalid",
+    "mailbox not found": "invalid",
+    "mailbox_not_found": "invalid",
+    "syntax error": "invalid",
+    "syntax_error": "invalid",
+    "disposable": "invalid",
+    "undeliverable": "invalid",
+    "rejected": "invalid",
+    "risky": "risky",
+    "catch-all": "risky",
+    "catch all": "risky",
+    "catch_all": "risky",
+    "accept all": "risky",
+    "accept_all": "risky",
+    "accept-all": "risky",
+    "unknown": "risky",
+    "role-based": "risky",
+    "role based": "risky",
+    "role_based": "risky",
+}
+
+
+class MailerCheckFormatError(ValueError):
+    """Raised when a MailerCheck CSV lacks an email or status column."""
+
+
+def normalize_mc_status(raw: str) -> str:
+    key = str(raw or "").strip().lower()
+    if key in _MC_STATUS_MAP:
+        return _MC_STATUS_MAP[key]
+    # Unrecognized but present -> treat as risky (never silently valid).
+    return "risky" if key else "risky"
+
+
+def _detect_mc_columns(mc_df: pd.DataFrame) -> tuple[str, str]:
+    cols = {str(c).lower().strip(): c for c in mc_df.columns}
+    email_col = next((cols[k] for k in cols if k in _MC_EMAIL_COLS), None)
+    status_col = next((cols[k] for k in cols if k in _MC_STATUS_COLS), None)
+    if email_col is None:
+        raise MailerCheckFormatError(
+            "No se detectó la columna de email en el CSV de MailerCheck "
+            "(esperado: email / Email Address / address)."
+        )
+    if status_col is None:
+        raise MailerCheckFormatError(
+            "No se detectó la columna de resultado/estado en el CSV de "
+            "MailerCheck (esperado: result / status / verification_status)."
+        )
+    return email_col, status_col
+
 
 def _row(e: EnrichedEmail) -> dict:
     c = e.company
@@ -37,6 +138,12 @@ def _row(e: EnrichedEmail) -> dict:
         "confidence": cls.confidence if cls else "",
         "brevo_recommended": e.brevo_recommended,
         "needs_ai_classification": e.needs_ai_classification,
+        "candidate_mode": e.match.candidate_mode or (
+            "none" if e.match.match_type != "generated_candidate" else ""
+        ),
+        "source_basis": e.match.source_basis,
+        "must_verify": e.match.must_verify
+        or e.match.match_type == "generated_candidate",
         "reason": cls.reason if cls else "",
         "evidence": cls.evidence if cls else "",
         "source": c.source,
@@ -157,6 +264,39 @@ def targets_without_email(
     return pd.DataFrame(rows)
 
 
+def _brevo_row(
+    email: str,
+    company,
+    *,
+    fuente_url: str,
+    fuente_urls_all: str,
+    tipo_email: str,
+    confianza: str,
+    fuente_email: str,
+    verification_status: str,
+    verification_provider: str,
+    fecha: str,
+) -> dict:
+    return {
+        "EMAIL": email,
+        "EMPRESA": company.company_name,
+        "NOMBRE": "",
+        "APELLIDO": "",
+        "PROVINCIA": company.state_or_province,
+        "CIUDAD": company.city,
+        "TELEFONO": company.phone,
+        "WEB": company.website,
+        "FUENTE_URL": fuente_url,
+        "FUENTE_URLS_ALL": fuente_urls_all,
+        "TIPO_EMAIL": tipo_email,
+        "CONFIANZA": confianza,
+        "FUENTE_EMAIL": fuente_email,
+        "FECHA_CAPTURA": fecha,
+        "VERIFICATION_STATUS": verification_status,
+        "VERIFICATION_PROVIDER": verification_provider,
+    }
+
+
 def brevo_pre_verification(enriched: List[EnrichedEmail]) -> pd.DataFrame:
     today = datetime.now().strftime("%Y-%m-%d")
     non_generated = [
@@ -166,33 +306,26 @@ def brevo_pre_verification(enriched: List[EnrichedEmail]) -> pd.DataFrame:
     items.sort(key=_priority)
     rows = []
     for e in items:
-        c = e.company
         cls = e.classification
         key = normalize_email(e.match.email)
         all_urls = urls.get(key) or (
             [e.match.source_url] if e.match.source_url else []
         )
         rows.append(
-            {
-                "EMAIL": key,
-                "EMPRESA": c.company_name,
-                "NOMBRE": "",
-                "APELLIDO": "",
-                "PROVINCIA": c.state_or_province,
-                "CIUDAD": c.city,
-                "TELEFONO": c.phone,
-                "WEB": c.website,
-                "FUENTE_URL": e.match.source_url,
-                "source_urls_all": " | ".join(all_urls),
-                "source_count": len(all_urls),
-                "TIPO_EMAIL": cls.email_type if cls else "",
-                "CONFIANZA": cls.confidence if cls else "",
-                "REASON": cls.reason if cls else "",
-                "EVIDENCE": cls.evidence if cls else "",
-                "FECHA_CAPTURA": today,
-            }
+            _brevo_row(
+                key,
+                e.company,
+                fuente_url=e.match.source_url,
+                fuente_urls_all=" | ".join(all_urls),
+                tipo_email=cls.email_type if cls else "",
+                confianza=cls.confidence if cls else "",
+                fuente_email="publico_web_sin_verificar",
+                verification_status="",
+                verification_provider="",
+                fecha=today,
+            )
         )
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=BREVO_COLUMNS)
 
 
 def visited_urls_frame(scrapes: List[ScrapeResult]) -> pd.DataFrame:
@@ -233,24 +366,53 @@ def raw_matches_frame(enriched: List[EnrichedEmail]) -> pd.DataFrame:
     return pd.DataFrame([_row(e) for e in enriched])
 
 
-def mailercheck_file(
-    enriched: List[EnrichedEmail], include_candidates: bool
-) -> pd.DataFrame:
+def _public_reps(enriched: List[EnrichedEmail]) -> List[EnrichedEmail]:
     non_generated = [
         e for e in enriched if e.match.match_type != "generated_candidate"
     ]
     reps, _ = dedupe_by_email(non_generated)
+    return reps
+
+
+def _candidate_reps(enriched: List[EnrichedEmail]) -> List[EnrichedEmail]:
+    generated = [
+        e for e in enriched if e.match.match_type == "generated_candidate"
+    ]
+    reps, _ = dedupe_by_email(generated)
+    return reps
+
+
+def mailercheck_public_emails(enriched: List[EnrichedEmail]) -> pd.DataFrame:
+    """Single `email` column: only accepted public emails, deduplicated."""
     emails = {
         normalize_email(e.match.email)
-        for e in reps
-        if e.final_decision != "reject"
+        for e in _public_reps(enriched)
+        if e.final_decision == "accept"
+    }
+    return pd.DataFrame({"email": sorted(e for e in emails if e)})
+
+
+def mailercheck_candidate_emails(enriched: List[EnrichedEmail]) -> pd.DataFrame:
+    """Single `email` column: only generic candidates, deduplicated."""
+    emails = {
+        normalize_email(e.match.email) for e in _candidate_reps(enriched)
+    }
+    return pd.DataFrame({"email": sorted(e for e in emails if e)})
+
+
+def mailercheck_file(
+    enriched: List[EnrichedEmail], include_candidates: bool = False
+) -> pd.DataFrame:
+    """Default: only accepted public emails. Candidates only on opt-in."""
+    emails = {
+        normalize_email(e.match.email)
+        for e in _public_reps(enriched)
+        if e.final_decision == "accept"
     }
     if include_candidates:
-        generated = [
-            e for e in enriched if e.match.match_type == "generated_candidate"
-        ]
-        cand_reps, _ = dedupe_by_email(generated)
-        emails |= {normalize_email(e.match.email) for e in cand_reps}
+        emails |= {
+            normalize_email(e.match.email) for e in _candidate_reps(enriched)
+        }
     return pd.DataFrame({"email": sorted(e for e in emails if e)})
 
 
@@ -287,68 +449,195 @@ def write_run(
     raw_matches_frame(enriched).to_csv(
         run_dir / "raw_email_matches.csv", index=False, encoding="utf-8-sig"
     )
+    mailercheck_file(enriched, include_candidates=False).to_csv(
+        run_dir / "mailercheck_emails.csv", index=False, encoding="utf-8-sig"
+    )
+    mailercheck_public_emails(enriched).to_csv(
+        run_dir / "mailercheck_public_emails.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    mailercheck_candidate_emails(enriched).to_csv(
+        run_dir / "mailercheck_candidate_emails.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
     (run_dir / "run_config.json").write_text(
         json.dumps(run_config, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     return run_dir
 
 
+def _public_row(e: EnrichedEmail, urls, status: str, today: str) -> dict:
+    key = normalize_email(e.match.email)
+    all_urls = urls.get(key) or ([e.match.source_url] if e.match.source_url else [])
+    cls = e.classification
+    return {
+        "email": key,
+        "company_name": e.company.company_name,
+        "domain": e.company.domain,
+        "website": e.company.website,
+        "source_url": e.match.source_url,
+        "source_urls_all": " | ".join(all_urls),
+        "source_count": len(all_urls),
+        "decision": e.final_decision,
+        "email_type": cls.email_type if cls else "",
+        "confidence": cls.confidence if cls else "",
+        "reason": cls.reason if cls else "",
+        "state_or_province": e.company.state_or_province,
+        "city": e.company.city,
+        "phone": e.company.phone,
+        "verification_status": status,
+        "verification_provider": "MailerCheck",
+        "verification_date": today,
+    }
+
+
+def _candidate_row(e: EnrichedEmail, status: str, today: str) -> dict:
+    key = normalize_email(e.match.email)
+    prefix = key.split("@")[0]
+    domain_match = e.match.email_domain.lower() == e.company.domain.lower()
+    brevo_ok = (
+        status == "valid"
+        and domain_match
+        and prefix in ALLOWED_CANDIDATE_PREFIXES
+    )
+    return {
+        "email": key,
+        "company_name": e.company.company_name,
+        "domain": e.company.domain,
+        "candidate_mode": e.match.candidate_mode,
+        "source_basis": "generated_generic_pattern",
+        "verification_status": status,
+        "verification_provider": "MailerCheck",
+        "verification_date": today,
+        "confidence": "medium" if status == "valid" else "low",
+        "FUENTE_EMAIL": "candidato_generico_verificado",
+        "brevo_recommended": brevo_ok,
+        "state_or_province": e.company.state_or_province,
+        "city": e.company.city,
+        "phone": e.company.phone,
+        "website": e.company.website,
+    }
+
+
 def cross_mailercheck(
-    enriched: List[EnrichedEmail], mc_df: pd.DataFrame
+    enriched: List[EnrichedEmail],
+    mc_df: pd.DataFrame,
+    include_combined: bool = False,
 ) -> Dict[str, pd.DataFrame]:
-    """Cross results with a MailerCheck export by email."""
-    cols = {c.lower().strip(): c for c in mc_df.columns}
-    email_col = cols.get("email") or list(mc_df.columns)[0]
-    status_col = (
-        cols.get("status")
-        or cols.get("result")
-        or cols.get("mailercheck_status")
-        or None
-    )
-    mc = mc_df.copy()
-    mc["_email"] = mc[email_col].astype(str).str.strip().str.lower()
-    if status_col:
-        mc["_status"] = mc[status_col].astype(str).str.strip().str.lower()
-    else:
-        mc["_status"] = "valid"
+    """Cross a MailerCheck export against public emails and candidates.
 
-    valid_emails = set(
-        mc.loc[mc["_status"].isin({"valid", "ok", "deliverable"}), "_email"]
-    )
+    Raises MailerCheckFormatError if email/status columns are not found.
+    """
+    email_col, status_col = _detect_mc_columns(mc_df)
+    status_by_email: Dict[str, str] = {}
+    for _, r in mc_df.iterrows():
+        em = normalize_email(str(r[email_col]))
+        if not em:
+            continue
+        st = normalize_mc_status(r[status_col])
+        # valid beats risky beats invalid if the same email repeats.
+        rank = {"valid": 0, "risky": 1, "invalid": 2}
+        if em not in status_by_email or rank[st] < rank[status_by_email[em]]:
+            status_by_email[em] = st
 
-    base = raw_matches_frame(enriched)
-    if base.empty:
-        empty = pd.DataFrame()
-        return {
-            "emails_validos_finales.csv": empty,
-            "emails_invalidos_descartados.csv": empty,
-            "brevo_import_final.csv": empty,
-        }
-    base["_email"] = base["email"].astype(str).str.strip().str.lower()
-    valid = base[base["_email"].isin(valid_emails)].reset_index(drop=True)
-    invalid = base[~base["_email"].isin(valid_emails)].reset_index(drop=True)
+    non_generated = [
+        e for e in enriched if e.match.match_type != "generated_candidate"
+    ]
+    pub_reps, pub_urls = dedupe_by_email(non_generated)
+    pub_reps = [e for e in pub_reps if e.final_decision != "reject"]
+    cand_reps = _candidate_reps(enriched)
 
     today = datetime.now().strftime("%Y-%m-%d")
-    brevo_rows = []
-    for _, r in valid.iterrows():
-        brevo_rows.append(
-            {
-                "EMAIL": r["email"],
-                "EMPRESA": r["company_name"],
-                "NOMBRE": "",
-                "APELLIDO": "",
-                "PROVINCIA": r.get("state_or_province", ""),
-                "CIUDAD": r.get("city", ""),
-                "TELEFONO": r.get("phone", ""),
-                "WEB": r.get("website", ""),
-                "FUENTE_URL": r.get("source_url", ""),
-                "TIPO_EMAIL": r.get("email_type", ""),
-                "CONFIANZA": r.get("confidence", ""),
-                "FECHA_CAPTURA": today,
-            }
+
+    pub = {"valid": [], "invalid": [], "risky": []}
+    for e in pub_reps:
+        key = normalize_email(e.match.email)
+        if key not in status_by_email:
+            continue
+        st = status_by_email[key]
+        pub[st].append(_public_row(e, pub_urls, st, today))
+
+    cand = {"valid": [], "invalid": [], "risky": []}
+    for e in cand_reps:
+        key = normalize_email(e.match.email)
+        if key not in status_by_email:
+            continue
+        st = status_by_email[key]
+        cand[st].append(_candidate_row(e, st, today))
+
+    pub_company = {
+        normalize_email(e.match.email): e.company for e in pub_reps
+    }
+
+    brevo_public = []
+    seen_pub = set()
+    for r in pub["valid"]:
+        if r["email"] in seen_pub:
+            continue
+        seen_pub.add(r["email"])
+        brevo_public.append(
+            _brevo_row(
+                r["email"],
+                pub_company[r["email"]],
+                fuente_url=r["source_url"],
+                fuente_urls_all=r["source_urls_all"],
+                tipo_email=r["email_type"],
+                confianza=r["confidence"],
+                fuente_email="publico_web_validado",
+                verification_status="valid",
+                verification_provider="MailerCheck",
+                fecha=today,
+            )
         )
+
+    cand_company = {
+        normalize_email(e.match.email): e.company for e in cand_reps
+    }
+    brevo_candidates = []
+    seen_cand = set()
+    for r in cand["valid"]:
+        if not r["brevo_recommended"] or r["email"] in seen_cand:
+            continue
+        seen_cand.add(r["email"])
+        brevo_candidates.append(
+            _brevo_row(
+                r["email"],
+                cand_company[r["email"]],
+                fuente_url="",
+                fuente_urls_all="",
+                tipo_email="generic_corporate",
+                confianza="medium",
+                fuente_email="candidato_generico_verificado",
+                verification_status="valid",
+                verification_provider="MailerCheck",
+                fecha=today,
+            )
+        )
+
+    brevo_pub_df = pd.DataFrame(brevo_public, columns=BREVO_COLUMNS)
+    brevo_cand_df = pd.DataFrame(brevo_candidates, columns=BREVO_COLUMNS)
+
+    if include_combined:
+        public_emails = set(brevo_pub_df["EMAIL"]) if not brevo_pub_df.empty else set()
+        extra = (
+            brevo_cand_df[~brevo_cand_df["EMAIL"].isin(public_emails)]
+            if not brevo_cand_df.empty
+            else brevo_cand_df
+        )
+        combined = pd.concat([brevo_pub_df, extra], ignore_index=True)
+    else:
+        combined = pd.DataFrame(columns=BREVO_COLUMNS)
+
     return {
-        "emails_validos_finales.csv": valid.drop(columns=["_email"]),
-        "emails_invalidos_descartados.csv": invalid.drop(columns=["_email"]),
-        "brevo_import_final.csv": pd.DataFrame(brevo_rows),
+        "emails_publicos_validos_finales.csv": pd.DataFrame(pub["valid"]),
+        "emails_publicos_invalidos_descartados.csv": pd.DataFrame(pub["invalid"]),
+        "emails_publicos_risky_review.csv": pd.DataFrame(pub["risky"]),
+        "candidatos_genericos_validos.csv": pd.DataFrame(cand["valid"]),
+        "candidatos_genericos_invalidos.csv": pd.DataFrame(cand["invalid"]),
+        "candidatos_genericos_risky_review.csv": pd.DataFrame(cand["risky"]),
+        "brevo_import_public_validated.csv": brevo_pub_df,
+        "brevo_import_candidates_verified.csv": brevo_cand_df,
+        "brevo_import_final_combined.csv": combined,
     }

@@ -118,6 +118,34 @@ nada en el sistema fuera de la carpeta.
 
 ---
 
+## Modos de candidatos y flujo recomendado
+
+- **Email público** = encontrado en la web (fiable, lista principal).
+- **Candidato genérico** = inventado por patrón (`info@`, `contacto@`...).
+  NO se encontró en ninguna parte: **no lo uses sin verificar antes con
+  MailerCheck**. Siempre va en archivos separados.
+
+En la barra lateral, "Modo de candidatos genéricos":
+
+- **Ninguno**: no genera.
+- **Conservador** (por defecto): solo `info@` y `contacto@`. Recomendado:
+  menos ruido y menos coste en MailerCheck.
+- **Estándar**: añade `comercial@`.
+- **Amplio**: hasta 6 prefijos.
+
+Flujo recomendado:
+
+1. Scraping + IA.
+2. Botón "Exportar emails públicos aceptados para MailerCheck".
+3. En tanda aparte: "Exportar candidatos genéricos para MailerCheck".
+4. Verifica ambos en MailerCheck.
+5. Pestaña "2. Importar resultados MailerCheck": sube el CSV de MailerCheck.
+6. Usa `brevo_import_public_validated.csv` como lista principal y
+   `brevo_import_candidates_verified.csv` como lista **separada**.
+
+Entregabilidad: empieza con lotes pequeños, opt-out claro, no reimportes
+bloqueados/baja/hard bounce, y no metas emails `invalid`/`risky` en Brevo.
+
 ## Nota para usuarios técnicos
 
 Los `.bat` no cambian la forma normal de ejecutar la app. Sigue siendo

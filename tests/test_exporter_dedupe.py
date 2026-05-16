@@ -94,8 +94,8 @@ def test_brevo_pre_verification_unique():
     brevo = brevo_pre_verification(items)
     assert brevo["EMAIL"].is_unique
     assert len(brevo) == 2
-    assert "source_count" in brevo.columns
-    assert "source_urls_all" in brevo.columns
+    assert "FUENTE_URLS_ALL" in brevo.columns
+    assert "FUENTE_EMAIL" in brevo.columns
 
 
 def test_email_normalized_in_dedupe_key():

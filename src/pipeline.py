@@ -50,6 +50,8 @@ def _enrich_match(match, company: Company, use_ai: bool) -> EnrichedEmail:
 def run_pipeline(
     companies: List[Company],
     use_ai: bool,
+    candidate_mode: str = "conservative",
+    candidates_with_review: bool = False,
     scrape_progress=None,
     classify_progress=None,
 ) -> tuple[List[EnrichedEmail], List[ScrapeResult]]:
@@ -57,6 +59,7 @@ def run_pipeline(
 
     enriched: List[EnrichedEmail] = []
     companies_with_accepted_public: set[str] = set()
+    companies_with_review_public: set[str] = set()
 
     total = len(scrapes)
     for idx, scrape in enumerate(scrapes, start=1):
@@ -64,23 +67,26 @@ def run_pipeline(
         for match in matches:
             item = _enrich_match(match, scrape.company, use_ai)
             enriched.append(item)
-            if (
-                match.match_type != "generated_candidate"
-                and item.final_decision == "accept"
-            ):
-                companies_with_accepted_public.add(
-                    scrape.company.company_name + "|" + scrape.company.domain
-                )
+            if match.match_type == "generated_candidate":
+                continue
+            key = scrape.company.company_name + "|" + scrape.company.domain
+            if item.final_decision == "accept":
+                companies_with_accepted_public.add(key)
+            elif item.final_decision == "review":
+                companies_with_review_public.add(key)
         if classify_progress:
             classify_progress(idx, total)
 
-    # Candidates only for companies with a domain and no accepted public email.
+    # Candidates: corporate domain, no accepted public email, and (unless the
+    # user opted in) no public emails sitting in review for that company.
     for scrape in scrapes:
         company = scrape.company
         key = company.company_name + "|" + company.domain
         if not company.domain or key in companies_with_accepted_public:
             continue
-        for cand in generate_candidates(company):
+        if key in companies_with_review_public and not candidates_with_review:
+            continue
+        for cand in generate_candidates(company, candidate_mode):
             enriched.append(_enrich_match(cand, company, use_ai=False))
 
     return enriched, scrapes

@@ -21,6 +21,7 @@ MatchType = Literal[
     "mailto",
     "generated_candidate",
 ]
+CandidateMode = Literal["none", "conservative", "standard", "broad"]
 
 
 class Company(BaseModel):
@@ -57,6 +58,9 @@ class EmailMatch(BaseModel):
     page_type: str
     text_context: str = ""
     match_type: MatchType
+    candidate_mode: str = ""
+    source_basis: str = "public_scrape"
+    must_verify: bool = False
 
 
 class Classification(BaseModel):

@@ -8,10 +8,13 @@ import streamlit as st
 
 from src.config import get_settings
 from src.exporter import (
+    MailerCheckFormatError,
     brevo_pre_verification,
     build_frames,
     cross_mailercheck,
+    mailercheck_candidate_emails,
     mailercheck_file,
+    mailercheck_public_emails,
     targets_without_email,
     write_run,
 )
@@ -30,6 +33,13 @@ st.title("B2B Email Enrichment")
 
 settings = get_settings()
 
+CANDIDATE_MODE_LABELS = {
+    "Ninguno": "none",
+    "Conservador": "conservative",
+    "Estándar": "standard",
+    "Amplio": "broad",
+}
+
 with st.sidebar:
     st.header("Configuración")
     st.write(
@@ -44,6 +54,23 @@ with st.sidebar:
     only_high = st.checkbox("Solo prioridad Alta", value=False)
     dedupe = st.checkbox("Deduplicar por dominio + empresa", value=True)
     settings.max_pages_per_domain = int(max_pages)
+
+    st.divider()
+    cand_label = st.selectbox(
+        "Modo de candidatos genéricos",
+        list(CANDIDATE_MODE_LABELS.keys()),
+        index=1,  # Conservador
+        help=(
+            "Ninguno: no genera. Conservador: info@, contacto@. "
+            "Estándar: + comercial@. Amplio: hasta 6 prefijos."
+        ),
+    )
+    candidate_mode = CANDIDATE_MODE_LABELS[cand_label]
+    candidates_with_review = st.checkbox(
+        "Generar candidatos aunque existan emails en review",
+        value=False,
+    )
+
     if st.session_state.get("last_run_dir"):
         st.success(
             f"Últimos resultados guardados en: "
@@ -56,8 +83,9 @@ with st.sidebar:
 
 st.info(
     "Uso responsable: solo fuentes públicas y contacto B2B legítimo. "
-    "Los candidatos generados NO deben importarse a Brevo sin verificación "
-    "previa (MailerCheck). Incluya opt-out en las campañas."
+    "Los candidatos genéricos NO son emails encontrados públicamente: son "
+    "hipótesis por patrón y deben verificarse con MailerCheck antes de "
+    "cualquier uso. Incluya opt-out en las campañas."
 )
 
 tab_enrich, tab_mailercheck = st.tabs(
@@ -82,6 +110,10 @@ def _operational_frames(enriched, companies, scrapes, include_candidates):
     frames["brevo_import_pre_verification.csv"] = brevo_pre_verification(enriched)
     frames["mailercheck_emails.csv"] = mailercheck_file(
         enriched, include_candidates
+    )
+    frames["mailercheck_public_emails.csv"] = mailercheck_public_emails(enriched)
+    frames["mailercheck_candidate_emails.csv"] = mailercheck_candidate_emails(
+        enriched
     )
     return frames
 
@@ -120,7 +152,8 @@ with tab_enrich:
         )
         st.write(
             f"Filas normalizadas: **{len(companies_all)}** — "
-            f"a procesar tras filtros: **{len(companies)}**"
+            f"a procesar tras filtros: **{len(companies)}** — "
+            f"modo candidatos: **{cand_label}**"
         )
 
         c1, c2 = st.columns(2)
@@ -146,7 +179,12 @@ with tab_enrich:
                 )
 
             enriched, scrapes = run_pipeline(
-                companies, use_ai=use_ai, scrape_progress=_sp, classify_progress=_cp
+                companies,
+                use_ai=use_ai,
+                candidate_mode=candidate_mode,
+                candidates_with_review=candidates_with_review,
+                scrape_progress=_sp,
+                classify_progress=_cp,
             )
 
             run_config = {
@@ -157,6 +195,8 @@ with tab_enrich:
                 "only_high_priority": only_high,
                 "max_pages_per_domain": int(max_pages),
                 "openai_enabled": settings.openai_enabled,
+                "candidate_mode": candidate_mode,
+                "candidates_with_review": candidates_with_review,
             }
             run_dir = write_run(enriched, companies, scrapes, run_config)
 
@@ -166,7 +206,6 @@ with tab_enrich:
             st.session_state["last_run_dir"] = str(run_dir)
             st.rerun()
 
-    # Results render from session_state so downloads never clear them.
     if "enriched" in st.session_state:
         enriched = st.session_state["enriched"]
         scrapes = st.session_state["scrapes"]
@@ -177,34 +216,64 @@ with tab_enrich:
             "(CSVs limpios y deduplicados por email)."
         )
 
-        decisions = [e.final_decision for e in enriched]
-        generated = sum(
-            1 for e in enriched if e.match.match_type == "generated_candidate"
-        )
-        m = st.columns(7)
-        m[0].metric("Empresas", len(companies))
-        m[1].metric("Dominios visitados", len({s.company.domain for s in scrapes}))
-        m[2].metric("Emails (raw)", len(enriched) - generated)
-        m[3].metric("Aceptados", decisions.count("accept"))
-        m[4].metric("Review", decisions.count("review"))
-        m[5].metric("Rechazados", decisions.count("reject"))
-        m[6].metric("Candidatos", generated)
+        frames = _operational_frames(enriched, companies, scrapes, False)
+        n_cand = len(frames["emails_genericos_candidatos_no_confirmados.csv"])
 
-        st.subheader("Generate MailerCheck file")
+        st.header("Emails públicos")
+        m = st.columns(5)
+        m[0].metric("Empresas", len(companies))
+        m[1].metric(
+            "Encontrados", len(frames["emails_publicos_encontrados.csv"])
+        )
+        m[2].metric(
+            "Aceptados", len(frames["emails_aceptados_para_mailercheck.csv"])
+        )
+        m[3].metric("Review", len(frames["emails_review.csv"]))
+        m[4].metric("Rechazados", len(frames["emails_rechazados.csv"]))
+
+        st.dataframe(
+            frames["emails_aceptados_para_mailercheck.csv"],
+            height=320,
+            width="stretch",
+        )
+        st.download_button(
+            "Exportar emails públicos aceptados para MailerCheck "
+            f"({len(frames['mailercheck_public_emails.csv'])})",
+            frames["mailercheck_public_emails.csv"].to_csv(index=False),
+            file_name="mailercheck_public_emails.csv",
+            mime="text/csv",
+        )
+
+        st.header("Candidatos genéricos")
+        st.write(
+            f"Modo usado: **{cand_label}** — candidatos generados: "
+            f"**{n_cand}** (separados de los emails públicos)."
+        )
+        st.warning(
+            "Estos emails NO fueron encontrados públicamente. Son hipótesis "
+            "por patrón y deben verificarse antes de cualquier uso."
+        )
+        st.dataframe(
+            frames["emails_genericos_candidatos_no_confirmados.csv"],
+            height=240,
+            width="stretch",
+        )
+        st.download_button(
+            "Exportar candidatos genéricos para MailerCheck "
+            f"({len(frames['mailercheck_candidate_emails.csv'])})",
+            frames["mailercheck_candidate_emails.csv"].to_csv(index=False),
+            file_name="mailercheck_candidate_emails.csv",
+            mime="text/csv",
+        )
+
+        st.header("Descargas")
         inc = st.checkbox(
-            "Incluir candidatos genéricos no confirmados",
+            "Incluir candidatos genéricos no confirmados en "
+            "mailercheck_emails.csv",
             value=False,
             key="inc_candidates",
         )
-
-        frames = _operational_frames(enriched, companies, scrapes, inc)
-
-        st.subheader("Resultados (deduplicados por email)")
-        st.dataframe(
-            frames["emails_aceptados_para_mailercheck.csv"],
-            height=380,
-            width="stretch",
-        )
+        frames["mailercheck_emails.csv"] = mailercheck_file(enriched, inc)
 
         for name, frame in frames.items():
             st.download_button(
@@ -226,24 +295,72 @@ with tab_enrich:
 with tab_mailercheck:
     st.write(
         "Sube el CSV exportado por MailerCheck para cruzarlo con los emails "
-        "encontrados en esta sesión."
+        "públicos y los candidatos genéricos de esta sesión."
+    )
+    st.warning(
+        "Los candidatos genéricos verificados técnicamente NO fueron "
+        "encontrados públicamente. Úsalos en campaña separada o con etiqueta "
+        "específica en Brevo."
     )
     if "enriched" not in st.session_state:
-        st.warning("Primero ejecuta el enriquecimiento en la pestaña anterior.")
+        st.info("Primero ejecuta el enriquecimiento en la pestaña anterior.")
     else:
+        include_combined = st.checkbox(
+            "Incluir candidatos genéricos verificados en el CSV final "
+            "combinado",
+            value=False,
+        )
         mc_up = st.file_uploader(
             "CSV de MailerCheck", type=["csv"], key="mc_upload"
         )
         if mc_up is not None:
             mc_df = read_csv_bytes(mc_up.getvalue())
             st.dataframe(mc_df.head(10), width="stretch")
-            result = cross_mailercheck(st.session_state["enriched"], mc_df)
-            for name, frame in result.items():
-                st.write(f"**{name}** — {len(frame)} filas")
-                st.download_button(
-                    f"Descargar {name}",
-                    frame.to_csv(index=False, encoding="utf-8-sig"),
-                    file_name=name,
-                    mime="text/csv",
-                    key=f"mc_dl_{name}",
+            try:
+                result = cross_mailercheck(
+                    st.session_state["enriched"], mc_df, include_combined
                 )
+            except MailerCheckFormatError as exc:
+                st.error(f"No se pudo procesar el CSV de MailerCheck: {exc}")
+                result = None
+
+            if result is not None:
+                cp = st.columns(3)
+                cp[0].metric(
+                    "Públicos válidos",
+                    len(result["emails_publicos_validos_finales.csv"]),
+                )
+                cp[1].metric(
+                    "Públicos descartados",
+                    len(result["emails_publicos_invalidos_descartados.csv"]),
+                )
+                cp[2].metric(
+                    "Públicos risky",
+                    len(result["emails_publicos_risky_review.csv"]),
+                )
+                cc = st.columns(3)
+                cc[0].metric(
+                    "Candidatos válidos",
+                    len(result["candidatos_genericos_validos.csv"]),
+                )
+                cc[1].metric(
+                    "Candidatos descartados",
+                    len(result["candidatos_genericos_invalidos.csv"]),
+                )
+                cc[2].metric(
+                    "Candidatos risky",
+                    len(result["candidatos_genericos_risky_review.csv"]),
+                )
+
+                for name, frame in result.items():
+                    if name == "brevo_import_final_combined.csv" and not (
+                        include_combined
+                    ):
+                        continue
+                    st.download_button(
+                        f"Descargar {name} ({len(frame)} filas)",
+                        frame.to_csv(index=False, encoding="utf-8-sig"),
+                        file_name=name,
+                        mime="text/csv",
+                        key=f"mc_dl_{name}",
+                    )
