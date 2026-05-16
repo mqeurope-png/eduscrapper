@@ -8,6 +8,7 @@ from typing import Dict, List
 import pandas as pd
 
 from .models import EnrichedEmail
+from .normalize import normalize_email
 from .scraper import ScrapeResult
 
 OUTPUTS_DIR = Path("outputs")
@@ -43,82 +44,96 @@ def _row(e: EnrichedEmail) -> dict:
 
 
 _PAGE_TYPE_RANK = {"contact": 0, "legal": 1, "privacy": 1, "home": 2}
+_DECISION_RANK = {"accept": 0, "review": 1, "reject": 2}
+_CONFIDENCE_RANK = {"high": 0, "medium": 1, "low": 2, "none": 3}
+_PREFERRED_TYPES = {"generic_corporate", "personal_corporate"}
 
 
-def _tiebreak_rank(e: EnrichedEmail) -> tuple[float, int]:
-    # Lower is better: highest score first, then page_type priority.
-    return (-e.deterministic_score, _PAGE_TYPE_RANK.get(e.match.page_type, 3))
+def _priority(e: EnrichedEmail) -> tuple:
+    """Sort key for picking the representative row. Lower is better."""
+    cls = e.classification
+    confidence = cls.confidence if cls else "none"
+    email_type = cls.email_type if cls else "none"
+    return (
+        _DECISION_RANK.get(e.final_decision, 3),
+        0 if e.brevo_recommended else 1,
+        _CONFIDENCE_RANK.get(confidence, 3),
+        0 if email_type in _PREFERRED_TYPES else 1,
+        -e.deterministic_score,
+        _PAGE_TYPE_RANK.get(e.match.page_type, 3),
+    )
 
 
 def dedupe_by_email(
-    enriched: List[EnrichedEmail], predicate=None
-) -> tuple[List[EnrichedEmail], Dict[str, str]]:
-    """Pick one representative EnrichedEmail per email and the joined URLs.
+    enriched: List[EnrichedEmail],
+) -> tuple[List[EnrichedEmail], Dict[str, List[str]]]:
+    """Collapse to one representative EnrichedEmail per normalized email.
 
-    The representative has the highest deterministic_score; ties are broken
-    by page_type (contact > legal/privacy > home > other). source_urls_all
-    aggregates every distinct URL where that email appeared, regardless of
-    the predicate, so provenance is never lost.
+    The representative is the best row by `_priority` (decision, brevo
+    recommendation, confidence, email_type, deterministic_score, page_type).
+    The second return value maps the normalized email to every distinct URL
+    where it appeared, so source_urls_all/source_count never lose provenance.
     """
     urls: Dict[str, List[str]] = {}
     for e in enriched:
+        key = normalize_email(e.match.email)
         if e.match.source_url:
-            bucket = urls.setdefault(e.match.email, [])
+            bucket = urls.setdefault(key, [])
             if e.match.source_url not in bucket:
                 bucket.append(e.match.source_url)
 
     chosen: Dict[str, EnrichedEmail] = {}
     for e in enriched:
-        if predicate is not None and not predicate(e):
-            continue
-        current = chosen.get(e.match.email)
-        if current is None or _tiebreak_rank(e) < _tiebreak_rank(current):
-            chosen[e.match.email] = e
+        key = normalize_email(e.match.email)
+        current = chosen.get(key)
+        if current is None or _priority(e) < _priority(current):
+            chosen[key] = e
 
-    joined = {
-        email: " | ".join(urls.get(email) or ([rep.match.source_url] if rep.match.source_url else []))
-        for email, rep in chosen.items()
-    }
-    return list(chosen.values()), joined
+    return list(chosen.values()), urls
+
+
+def _deduped_rows(items: List[EnrichedEmail], urls: Dict[str, List[str]]) -> List[dict]:
+    rows = []
+    for e in items:
+        key = normalize_email(e.match.email)
+        all_urls = urls.get(key) or (
+            [e.match.source_url] if e.match.source_url else []
+        )
+        row = _row(e)
+        row["email"] = key
+        row["source_urls_all"] = " | ".join(all_urls)
+        row["source_count"] = len(all_urls)
+        rows.append(row)
+    return rows
 
 
 def build_frames(enriched: List[EnrichedEmail]) -> Dict[str, pd.DataFrame]:
-    rows = [_row(e) for e in enriched]
-    df = pd.DataFrame(rows)
-    if df.empty:
-        df = pd.DataFrame(columns=list(_row.__annotations__) or ["email"])
+    non_generated = [
+        e for e in enriched if e.match.match_type != "generated_candidate"
+    ]
+    generated = [
+        e for e in enriched if e.match.match_type == "generated_candidate"
+    ]
 
-    def sub(mask) -> pd.DataFrame:
-        return df[mask].reset_index(drop=True) if not df.empty else df
+    reps, urls = dedupe_by_email(non_generated)
+    reps.sort(key=_priority)
+    rep_rows = _deduped_rows(reps, urls)
+    public_df = pd.DataFrame(rep_rows)
 
-    public = sub(df["match_type"] != "generated_candidate") if not df.empty else df
+    def by_decision(decision: str) -> pd.DataFrame:
+        rows = [r for r in rep_rows if r["decision"] == decision]
+        return pd.DataFrame(rows)
 
-    accepted_items, accepted_urls = dedupe_by_email(
-        enriched,
-        lambda e: e.final_decision == "accept"
-        and e.match.match_type != "generated_candidate",
-    )
-    accepted = pd.DataFrame(
-        [
-            {**_row(e), "source_urls_all": accepted_urls[e.match.email]}
-            for e in accepted_items
-        ]
-    )
+    cand_reps, cand_urls = dedupe_by_email(generated)
+    candidates_df = pd.DataFrame(_deduped_rows(cand_reps, cand_urls))
 
-    review = sub(df["decision"] == "review") if not df.empty else df
-    rejected = sub(df["decision"] == "reject") if not df.empty else df
-    candidates = (
-        sub(df["match_type"] == "generated_candidate") if not df.empty else df
-    )
-
-    frames = {
-        "emails_publicos_encontrados.csv": public,
-        "emails_aceptados_para_mailercheck.csv": accepted,
-        "emails_review.csv": review,
-        "emails_rechazados.csv": rejected,
-        "emails_genericos_candidatos_no_confirmados.csv": candidates,
+    return {
+        "emails_publicos_encontrados.csv": public_df,
+        "emails_aceptados_para_mailercheck.csv": by_decision("accept"),
+        "emails_review.csv": by_decision("review"),
+        "emails_rechazados.csv": by_decision("reject"),
+        "emails_genericos_candidatos_no_confirmados.csv": candidates_df,
     }
-    return frames
 
 
 def targets_without_email(
@@ -144,16 +159,22 @@ def targets_without_email(
 
 def brevo_pre_verification(enriched: List[EnrichedEmail]) -> pd.DataFrame:
     today = datetime.now().strftime("%Y-%m-%d")
-    items, urls = dedupe_by_email(
-        enriched, lambda e: e.match.match_type != "generated_candidate"
-    )
+    non_generated = [
+        e for e in enriched if e.match.match_type != "generated_candidate"
+    ]
+    items, urls = dedupe_by_email(non_generated)
+    items.sort(key=_priority)
     rows = []
     for e in items:
         c = e.company
         cls = e.classification
+        key = normalize_email(e.match.email)
+        all_urls = urls.get(key) or (
+            [e.match.source_url] if e.match.source_url else []
+        )
         rows.append(
             {
-                "EMAIL": e.match.email,
+                "EMAIL": key,
                 "EMPRESA": c.company_name,
                 "NOMBRE": "",
                 "APELLIDO": "",
@@ -162,9 +183,12 @@ def brevo_pre_verification(enriched: List[EnrichedEmail]) -> pd.DataFrame:
                 "TELEFONO": c.phone,
                 "WEB": c.website,
                 "FUENTE_URL": e.match.source_url,
-                "source_urls_all": urls[e.match.email],
+                "source_urls_all": " | ".join(all_urls),
+                "source_count": len(all_urls),
                 "TIPO_EMAIL": cls.email_type if cls else "",
                 "CONFIANZA": cls.confidence if cls else "",
+                "REASON": cls.reason if cls else "",
+                "EVIDENCE": cls.evidence if cls else "",
                 "FECHA_CAPTURA": today,
             }
         )
@@ -212,14 +236,22 @@ def raw_matches_frame(enriched: List[EnrichedEmail]) -> pd.DataFrame:
 def mailercheck_file(
     enriched: List[EnrichedEmail], include_candidates: bool
 ) -> pd.DataFrame:
-    emails: list[str] = []
-    for e in enriched:
-        if e.match.match_type == "generated_candidate" and not include_candidates:
-            continue
-        if e.match.match_type != "generated_candidate" and e.final_decision == "reject":
-            continue
-        emails.append(e.match.email)
-    return pd.DataFrame({"email": sorted(set(emails))})
+    non_generated = [
+        e for e in enriched if e.match.match_type != "generated_candidate"
+    ]
+    reps, _ = dedupe_by_email(non_generated)
+    emails = {
+        normalize_email(e.match.email)
+        for e in reps
+        if e.final_decision != "reject"
+    }
+    if include_candidates:
+        generated = [
+            e for e in enriched if e.match.match_type == "generated_candidate"
+        ]
+        cand_reps, _ = dedupe_by_email(generated)
+        emails |= {normalize_email(e.match.email) for e in cand_reps}
+    return pd.DataFrame({"email": sorted(e for e in emails if e)})
 
 
 def write_run(

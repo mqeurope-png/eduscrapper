@@ -44,6 +44,15 @@ with st.sidebar:
     only_high = st.checkbox("Solo prioridad Alta", value=False)
     dedupe = st.checkbox("Deduplicar por dominio + empresa", value=True)
     settings.max_pages_per_domain = int(max_pages)
+    if st.session_state.get("last_run_dir"):
+        st.success(
+            f"Últimos resultados guardados en: "
+            f"`{st.session_state['last_run_dir']}`"
+        )
+        if st.button("Limpiar resultados actuales", width="content"):
+            for k in ("enriched", "scrapes", "companies", "last_run_dir"):
+                st.session_state.pop(k, None)
+            st.rerun()
 
 st.info(
     "Uso responsable: solo fuentes públicas y contacto B2B legítimo. "
@@ -64,12 +73,25 @@ def _zip_frames(frames: dict[str, pd.DataFrame]) -> bytes:
     return buf.getvalue()
 
 
+def _operational_frames(enriched, companies, scrapes, include_candidates):
+    """Exactly the clean, deduplicated CSVs the user sees and downloads."""
+    frames = build_frames(enriched)
+    frames["targets_sin_email_encontrado.csv"] = targets_without_email(
+        enriched, companies, scrapes
+    )
+    frames["brevo_import_pre_verification.csv"] = brevo_pre_verification(enriched)
+    frames["mailercheck_emails.csv"] = mailercheck_file(
+        enriched, include_candidates
+    )
+    return frames
+
+
 with tab_enrich:
     uploaded = st.file_uploader("Sube el CSV de empresas", type=["csv"])
     if uploaded is not None:
         raw = read_csv_bytes(uploaded.getvalue())
         st.subheader("Preview")
-        st.dataframe(raw.head(20), use_container_width=True)
+        st.dataframe(raw.head(20), width="stretch")
 
         st.subheader("Mapeo de columnas")
         guessed = guess_mapping(list(raw.columns))
@@ -102,10 +124,10 @@ with tab_enrich:
         )
 
         c1, c2 = st.columns(2)
-        run_scrape = c1.button("Run scraping only", use_container_width=True)
+        run_scrape = c1.button("Run scraping only", width="stretch")
         run_ai = c2.button(
             "Run scraping + AI classification",
-            use_container_width=True,
+            width="stretch",
             disabled=not settings.openai_enabled,
         )
 
@@ -139,55 +161,66 @@ with tab_enrich:
             run_dir = write_run(enriched, companies, scrapes, run_config)
 
             st.session_state["enriched"] = enriched
-            st.success(f"Completado. Resultados guardados en `{run_dir}`")
+            st.session_state["scrapes"] = scrapes
+            st.session_state["companies"] = companies
+            st.session_state["last_run_dir"] = str(run_dir)
+            st.rerun()
 
-            decisions = [e.final_decision for e in enriched]
-            generated = sum(
-                1 for e in enriched if e.match.match_type == "generated_candidate"
-            )
-            m = st.columns(7)
-            m[0].metric("Empresas", len(companies))
-            m[1].metric("Dominios visitados", len({s.company.domain for s in scrapes}))
-            m[2].metric("Emails encontrados", len(enriched) - generated)
-            m[3].metric("Aceptados", decisions.count("accept"))
-            m[4].metric("Review", decisions.count("review"))
-            m[5].metric("Rechazados", decisions.count("reject"))
-            m[6].metric("Candidatos", generated)
+    # Results render from session_state so downloads never clear them.
+    if "enriched" in st.session_state:
+        enriched = st.session_state["enriched"]
+        scrapes = st.session_state["scrapes"]
+        companies = st.session_state["companies"]
 
-            frames = build_frames(enriched)
-            frames["targets_sin_email_encontrado.csv"] = targets_without_email(
-                enriched, companies, scrapes
-            )
-            frames["brevo_import_pre_verification.csv"] = brevo_pre_verification(
-                enriched
-            )
+        st.success(
+            f"Resultados guardados en `{st.session_state['last_run_dir']}` "
+            "(CSVs limpios y deduplicados por email)."
+        )
 
-            st.subheader("Resultados")
-            st.dataframe(frames["emails_publicos_encontrados.csv"], height=400)
+        decisions = [e.final_decision for e in enriched]
+        generated = sum(
+            1 for e in enriched if e.match.match_type == "generated_candidate"
+        )
+        m = st.columns(7)
+        m[0].metric("Empresas", len(companies))
+        m[1].metric("Dominios visitados", len({s.company.domain for s in scrapes}))
+        m[2].metric("Emails (raw)", len(enriched) - generated)
+        m[3].metric("Aceptados", decisions.count("accept"))
+        m[4].metric("Review", decisions.count("review"))
+        m[5].metric("Rechazados", decisions.count("reject"))
+        m[6].metric("Candidatos", generated)
 
-            for name, frame in frames.items():
-                st.download_button(
-                    f"Descargar {name}",
-                    frame.to_csv(index=False, encoding="utf-8-sig"),
-                    file_name=name,
-                    mime="text/csv",
-                    key=f"dl_{name}",
-                )
+        st.subheader("Generate MailerCheck file")
+        inc = st.checkbox(
+            "Incluir candidatos genéricos no confirmados",
+            value=False,
+            key="inc_candidates",
+        )
 
-            st.subheader("Generate MailerCheck file")
-            inc = st.checkbox("Incluir candidatos genéricos no confirmados", False)
+        frames = _operational_frames(enriched, companies, scrapes, inc)
+
+        st.subheader("Resultados (deduplicados por email)")
+        st.dataframe(
+            frames["emails_aceptados_para_mailercheck.csv"],
+            height=380,
+            width="stretch",
+        )
+
+        for name, frame in frames.items():
             st.download_button(
-                "Descargar mailercheck_emails.csv",
-                mailercheck_file(enriched, inc).to_csv(index=False),
-                file_name="mailercheck_emails.csv",
+                f"Descargar {name} ({len(frame)} filas)",
+                frame.to_csv(index=False, encoding="utf-8-sig"),
+                file_name=name,
                 mime="text/csv",
+                key=f"dl_{name}",
             )
-            st.download_button(
-                "Descargar TODO (zip)",
-                _zip_frames(frames),
-                file_name="resultados.zip",
-                mime="application/zip",
-            )
+
+        st.download_button(
+            "Descargar TODO (zip) — exactamente estos CSVs limpios",
+            _zip_frames(frames),
+            file_name="resultados.zip",
+            mime="application/zip",
+        )
 
 
 with tab_mailercheck:
@@ -203,7 +236,7 @@ with tab_mailercheck:
         )
         if mc_up is not None:
             mc_df = read_csv_bytes(mc_up.getvalue())
-            st.dataframe(mc_df.head(10), use_container_width=True)
+            st.dataframe(mc_df.head(10), width="stretch")
             result = cross_mailercheck(st.session_state["enriched"], mc_df)
             for name, frame in result.items():
                 st.write(f"**{name}** — {len(frame)} filas")

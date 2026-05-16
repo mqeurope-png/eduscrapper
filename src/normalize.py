@@ -14,6 +14,14 @@ def clean_text(value: str | None) -> str:
     return re.sub(r"\s+", " ", str(value)).strip()
 
 
+def normalize_email(email: str | None) -> str:
+    if not email:
+        return ""
+    value = str(email).strip().lower().replace("mailto:", "")
+    value = value.strip(" .,;:()[]{}<>\"'")
+    return value
+
+
 def normalize_company(name: str | None) -> str:
     return clean_text(name)
 
