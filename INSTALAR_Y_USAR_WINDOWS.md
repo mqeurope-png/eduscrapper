@@ -27,19 +27,22 @@ Si ya tienes Python 3.11 instalado, sáltate este paso.
 
 ## 2. Abrir la app
 
-**Doble clic en `Abrir Email Scraper.bat`**
+**Haz doble clic en `INICIAR_EMAIL_SCRAPER.bat`**
 
-La primera vez tarda 1-3 minutos: crea el entorno `.venv`, instala las
-dependencias y prepara el archivo `.env`. Verás mensajes en español en una
-ventana negra. Cuando esté listo, el navegador se abre solo en:
+Es el único launcher. La primera vez tarda 1-3 minutos: crea el entorno
+`.venv`, instala las dependencias y prepara el archivo `.env`. Verás
+mensajes en español en una ventana negra. Cuando esté listo, el navegador
+se abre solo en:
 
 ```
 http://localhost:8501
 ```
 
-Las siguientes veces puedes usar **`Abrir Email Scraper Rapido.bat`**, que
-no comprueba nada y arranca en segundos (úsalo solo cuando ya funcionó una
-vez con el `.bat` normal).
+Cada vez comprueba e instala dependencias (tarda un poco más, pero es
+fiable). No necesitas editar ningún `.bat` nunca.
+
+> **No cierres la ventana negra mientras uses la app. Para cerrar la app,
+> pulsa `Ctrl + C` o cierra la ventana.**
 
 ¿Quieres un icono en el Escritorio? Clic derecho en
 `crear_acceso_directo_windows.ps1` → **Ejecutar con PowerShell**. Creará un
@@ -61,13 +64,13 @@ ventana negra.
 
 Solo si quieres la clasificación con IA:
 
-1. En la carpeta de la app, clic derecho sobre `.env` → **Abrir con** →
-   **Bloc de notas**.
+1. **Doble clic en `CONFIGURAR_OPENAI.bat`** (crea `.env` si no existe y lo
+   abre en el Bloc de notas automáticamente).
 2. En la línea `OPENAI_API_KEY=` escribe tu clave después del `=`:
    ```
    OPENAI_API_KEY=sk-tu-clave-aqui
    ```
-3. Guarda (`Ctrl + S`) y cierra.
+3. Guarda (`Ctrl + S`) y cierra el Bloc de notas.
 4. Si la app estaba abierta, ciérrala y vuelve a abrirla.
 
 Sin clave, la app funciona igual en modo **"solo scraping"**.
