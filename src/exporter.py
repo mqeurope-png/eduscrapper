@@ -42,6 +42,46 @@ def _row(e: EnrichedEmail) -> dict:
     }
 
 
+_PAGE_TYPE_RANK = {"contact": 0, "legal": 1, "privacy": 1, "home": 2}
+
+
+def _tiebreak_rank(e: EnrichedEmail) -> tuple[float, int]:
+    # Lower is better: highest score first, then page_type priority.
+    return (-e.deterministic_score, _PAGE_TYPE_RANK.get(e.match.page_type, 3))
+
+
+def dedupe_by_email(
+    enriched: List[EnrichedEmail], predicate=None
+) -> tuple[List[EnrichedEmail], Dict[str, str]]:
+    """Pick one representative EnrichedEmail per email and the joined URLs.
+
+    The representative has the highest deterministic_score; ties are broken
+    by page_type (contact > legal/privacy > home > other). source_urls_all
+    aggregates every distinct URL where that email appeared, regardless of
+    the predicate, so provenance is never lost.
+    """
+    urls: Dict[str, List[str]] = {}
+    for e in enriched:
+        if e.match.source_url:
+            bucket = urls.setdefault(e.match.email, [])
+            if e.match.source_url not in bucket:
+                bucket.append(e.match.source_url)
+
+    chosen: Dict[str, EnrichedEmail] = {}
+    for e in enriched:
+        if predicate is not None and not predicate(e):
+            continue
+        current = chosen.get(e.match.email)
+        if current is None or _tiebreak_rank(e) < _tiebreak_rank(current):
+            chosen[e.match.email] = e
+
+    joined = {
+        email: " | ".join(urls.get(email) or ([rep.match.source_url] if rep.match.source_url else []))
+        for email, rep in chosen.items()
+    }
+    return list(chosen.values()), joined
+
+
 def build_frames(enriched: List[EnrichedEmail]) -> Dict[str, pd.DataFrame]:
     rows = [_row(e) for e in enriched]
     df = pd.DataFrame(rows)
@@ -52,7 +92,19 @@ def build_frames(enriched: List[EnrichedEmail]) -> Dict[str, pd.DataFrame]:
         return df[mask].reset_index(drop=True) if not df.empty else df
 
     public = sub(df["match_type"] != "generated_candidate") if not df.empty else df
-    accepted = sub((df["decision"] == "accept")) if not df.empty else df
+
+    accepted_items, accepted_urls = dedupe_by_email(
+        enriched,
+        lambda e: e.final_decision == "accept"
+        and e.match.match_type != "generated_candidate",
+    )
+    accepted = pd.DataFrame(
+        [
+            {**_row(e), "source_urls_all": accepted_urls[e.match.email]}
+            for e in accepted_items
+        ]
+    )
+
     review = sub(df["decision"] == "review") if not df.empty else df
     rejected = sub(df["decision"] == "reject") if not df.empty else df
     candidates = (
@@ -92,10 +144,11 @@ def targets_without_email(
 
 def brevo_pre_verification(enriched: List[EnrichedEmail]) -> pd.DataFrame:
     today = datetime.now().strftime("%Y-%m-%d")
+    items, urls = dedupe_by_email(
+        enriched, lambda e: e.match.match_type != "generated_candidate"
+    )
     rows = []
-    for e in enriched:
-        if e.match.match_type == "generated_candidate":
-            continue
+    for e in items:
         c = e.company
         cls = e.classification
         rows.append(
@@ -109,6 +162,7 @@ def brevo_pre_verification(enriched: List[EnrichedEmail]) -> pd.DataFrame:
                 "TELEFONO": c.phone,
                 "WEB": c.website,
                 "FUENTE_URL": e.match.source_url,
+                "source_urls_all": urls[e.match.email],
                 "TIPO_EMAIL": cls.email_type if cls else "",
                 "CONFIANZA": cls.confidence if cls else "",
                 "FECHA_CAPTURA": today,
