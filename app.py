@@ -73,15 +73,25 @@ with st.sidebar:
 
     st.divider()
     auto_resolve = st.checkbox(
-        "Resolver dominios desconocidos con OpenAI Web Search",
+        "Resolver dominios desconocidos (paso previo)",
         value=False,
         disabled=not settings.openai_enabled,
         help=(
-            "Para filas sin dominio: usa la búsqueda web de OpenAI para "
-            "encontrar la web oficial. Requiere OPENAI_API_KEY. Coste por "
-            "consulta según tarifa de OpenAI."
+            "Para filas sin dominio. Requiere OPENAI_API_KEY como mínimo. "
+            "Si añades BRAVE_API_KEY en .env puedes elegir Brave + clasificación "
+            "GPT (mucho más barato que OpenAI Web Search)."
         ),
     )
+    provider_options = ["OpenAI Web Search (~$25/1.000)"]
+    if settings.brave_enabled:
+        provider_options.insert(0, "Brave + GPT clasificación (~$3/1.000)")
+    provider_label = st.selectbox(
+        "Proveedor de búsqueda",
+        provider_options,
+        index=0,
+        disabled=(not auto_resolve) or (not settings.openai_enabled),
+    )
+    resolver_provider = "brave" if provider_label.startswith("Brave") else "openai"
 
     if st.session_state.get("last_run_dir"):
         st.success(
@@ -212,6 +222,7 @@ with tab_enrich:
                 candidate_mode=candidate_mode,
                 candidates_with_review=candidates_with_review,
                 auto_resolve_domains=auto_resolve,
+                resolver_provider=resolver_provider,
                 scrape_progress=_sp,
                 classify_progress=_cp,
                 resolve_progress=_rp,
@@ -228,6 +239,7 @@ with tab_enrich:
                 "candidate_mode": candidate_mode,
                 "candidates_with_review": candidates_with_review,
                 "auto_resolve_domains": auto_resolve,
+                "resolver_provider": resolver_provider if auto_resolve else None,
             }
             run_dir = write_run(
                 enriched, companies, scrapes, run_config, resolutions=resolutions

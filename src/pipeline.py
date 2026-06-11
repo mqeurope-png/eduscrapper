@@ -54,13 +54,23 @@ def run_pipeline(
     candidate_mode: str = "conservative",
     candidates_with_review: bool = False,
     auto_resolve_domains: bool = False,
+    resolver_provider: str = "openai",
     scrape_progress=None,
     classify_progress=None,
     resolve_progress=None,
 ) -> tuple[List[EnrichedEmail], List[ScrapeResult], List[Resolution]]:
     resolutions: List[Resolution] = []
-    if auto_resolve_domains and get_settings().openai_enabled:
-        resolutions = resolve_missing_domains(companies, progress_cb=resolve_progress)
+    if auto_resolve_domains:
+        s = get_settings()
+        ok = s.openai_enabled and (
+            resolver_provider != "brave" or s.brave_enabled
+        )
+        if ok:
+            resolutions = resolve_missing_domains(
+                companies,
+                progress_cb=resolve_progress,
+                provider=resolver_provider,
+            )
     scrapes = scrape_companies(companies, progress_cb=scrape_progress)
 
     enriched: List[EnrichedEmail] = []

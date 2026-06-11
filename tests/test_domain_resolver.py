@@ -107,3 +107,99 @@ def test_low_confidence_does_not_fill_domain():
     assert resolutions[0].confidence == "low"
     # But the company is left untouched, so it appears in targets_sin_email
     assert company.domain == ""
+
+
+# ---- Brave provider --------------------------------------------------------
+
+
+def _brave_results(items):
+    """Build raw Brave-like results from (url, title, description) tuples."""
+    return [{"url": u, "title": t, "description": d} for (u, t, d) in items]
+
+
+def test_brave_filters_blocked_and_classifier_picks_corporate():
+    raw = _brave_results([
+        ("https://linkedin.com/company/acme", "Acme — LinkedIn", "perfil"),
+        ("https://acme.es/", "Acme SL", "Página oficial"),
+        ("https://paginasamarillas.es/acme", "Acme - Directorio", "dir"),
+    ])
+    classify = lambda p, m: '{"index": 1, "domain": "acme.es", "url": "https://acme.es/", "confidence": "high", "reason": "slug match"}'
+    res = resolve_domain(
+        "Acme SL", "Madrid", provider="brave",
+        search_fn=lambda q: raw, classify_fn=classify,
+    )
+    assert res.provider == "brave"
+    assert res.chosen_domain == "acme.es"
+    assert res.confidence == "high"
+
+
+def test_brave_no_results_returns_none():
+    res = resolve_domain(
+        "Empresa Fantasma", "Madrid", provider="brave",
+        search_fn=lambda q: [],
+        classify_fn=lambda p, m: "should not be called",
+    )
+    assert res.chosen_domain == ""
+    assert res.confidence == "none"
+    assert "sin_resultados" in res.reason
+
+
+def test_brave_classifier_can_decline():
+    raw = _brave_results([
+        ("https://otraempresa.com/", "Otra empresa", "no relacionada"),
+    ])
+    classify = lambda p, m: '{"index": null, "domain": "", "url": "", "confidence": "none", "reason": "no parece la oficial"}'
+    res = resolve_domain(
+        "Mi Empresa", "Madrid", provider="brave",
+        search_fn=lambda q: raw, classify_fn=classify,
+    )
+    assert res.chosen_domain == ""
+    assert res.confidence == "none"
+
+
+def test_brave_index_fallback_when_no_domain_in_json():
+    raw = _brave_results([
+        ("https://acme.es/", "Acme SL", "oficial"),
+        ("https://otra.com/", "Otra", "no"),
+    ])
+    classify = lambda p, m: '{"index": 1, "domain": "", "url": "", "confidence": "high", "reason": "el 1"}'
+    res = resolve_domain(
+        "Acme SL", "Madrid", provider="brave",
+        search_fn=lambda q: raw, classify_fn=classify,
+    )
+    assert res.chosen_domain == "acme.es"
+
+
+def test_brave_search_exception_reported():
+    def boom(q):
+        raise RuntimeError("brave down")
+    res = resolve_domain(
+        "X", "Y", provider="brave",
+        search_fn=boom, classify_fn=lambda p, m: "{}",
+    )
+    assert res.error.startswith("search:")
+    assert res.chosen_domain == ""
+
+
+def test_brave_classifier_exception_reported():
+    raw = _brave_results([("https://acme.es/", "Acme", "")])
+    def boom(p, m):
+        raise RuntimeError("openai down")
+    res = resolve_domain(
+        "Acme", "Madrid", provider="brave",
+        search_fn=lambda q: raw, classify_fn=boom,
+    )
+    assert res.error.startswith("classify:")
+
+
+def test_resolve_missing_brave_sets_provider_tag():
+    company = Company(company_name="Acme SL", state_or_province="Madrid")
+    raw = _brave_results([("https://acme.es/", "Acme SL", "oficial")])
+    classify = lambda p, m: '{"index": 1, "domain": "acme.es", "url": "https://acme.es", "confidence": "high", "reason": ""}'
+    resolutions = resolve_missing_domains(
+        [company], provider="brave",
+        search_fn=lambda q: raw, classify_fn=classify,
+    )
+    assert resolutions[0].provider == "brave"
+    assert company.domain == "acme.es"
+    assert "resolved_via=brave" in company.source

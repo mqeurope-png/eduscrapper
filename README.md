@@ -48,21 +48,36 @@ La app es 100% local. No usa base de datos ni despliegue cloud.
 
 Si tu CSV trae filas con solo `company_name` (+ provincia/país) y sin
 `domain`/`website`, activa en la barra lateral **"Resolver dominios
-desconocidos con OpenAI Web Search"**. La app usa la herramienta de
-búsqueda web de OpenAI (API Responses, `web_search`) para encontrar el
-sitio oficial y rellenar el dominio antes de scrapear.
+desconocidos (paso previo)"**. La app busca el sitio oficial y rellena
+el dominio antes de scrapear.
 
-- Solo se ejecuta para filas que no tienen dominio.
+Hay dos proveedores. Eliges en la barra lateral según las claves que
+tengas en `.env`:
+
+| Proveedor | Coste aprox. 1.000 resoluciones | Requiere |
+| --- | --- | --- |
+| **Brave + clasificación GPT** | ~$3 (Brave) + céntimos (`gpt-4o-mini`) | `OPENAI_API_KEY` **y** `BRAVE_API_KEY` |
+| **OpenAI Web Search** (cómodo) | ~$25 | solo `OPENAI_API_KEY` |
+
+Para 9.000 empresas son **~$30 con Brave** vs **~$230 con OpenAI**.
+
+Crea una clave Brave gratis en https://api.search.brave.com y pega
+`BRAVE_API_KEY=...` en `.env`. El selector "Brave + GPT clasificación"
+aparece automáticamente. La capa GPT solo ordena los resultados de
+Brave (no busca nada por su cuenta), así que su parte del coste es
+ruido frente a la búsqueda.
+
+Comportamiento común a los dos proveedores:
+
+- Solo procesa filas sin dominio.
 - Filtra LinkedIn, Facebook, directorios, marketplaces, Google Maps,
   Wikipedia, etc.
 - Solo rellena el dominio si la confianza es `high` o `medium`; en `low`
-  o `none` se registra la resolución pero el dominio queda vacío para que
-  lo revises a mano.
-- Genera `domain_resolutions.csv` en `outputs/run_.../` con la consulta,
-  el dominio elegido, la URL, la confianza y el motivo (auditoría).
-- Coste: cada resolución consume una llamada con `web_search` en OpenAI
-  (tarifa de OpenAI por consulta + tokens). Variable `OPENAI_SEARCH_MODEL`
-  en `.env`, por defecto `gpt-4o-mini`.
+  o `none` se registra la resolución pero el dominio queda vacío.
+- Genera `domain_resolutions.csv` en `outputs/run_.../` con consulta,
+  dominio elegido, URL, confianza, motivo, **proveedor** usado y errores.
+- Modelo de clasificación: variable `OPENAI_SEARCH_MODEL` en `.env`,
+  por defecto `gpt-4o-mini`.
 
 ## Email público encontrado vs. candidato generado
 

@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, List, Optional
 
+import httpx
 import tldextract
 
 from .config import get_settings
@@ -14,7 +15,6 @@ from .logger import get_logger
 logger = get_logger()
 _EXTRACT = tldextract.TLDExtract(suffix_list_urls=())
 
-# Never return these as a "corporate website".
 BLOCKED_DOMAINS = {
     "linkedin.com", "facebook.com", "instagram.com", "twitter.com", "x.com",
     "youtube.com", "tiktok.com", "pinterest.com", "wikipedia.org",
@@ -24,27 +24,10 @@ BLOCKED_DOMAINS = {
     "ebay.com", "glassdoor.com", "indeed.com", "europages.es", "axesor.es",
     "einforma.com", "infoempresa.com", "expansion.com", "wordpress.com",
     "blogspot.com", "wixsite.com", "weebly.com", "jimdo.com", "jimdofree.com",
-    "crunchbase.com", "empresite.eleconomista.es",
+    "crunchbase.com", "empresite.eleconomista.es", "bing.com", "duckduckgo.com",
 }
 
-PROMPT_TEMPLATE = (
-    "Encuentra el sitio web corporativo OFICIAL de la siguiente empresa "
-    "usando búsqueda web. No inventes dominios.\n\n"
-    "Empresa: {company}\n"
-    "Localización: {location}\n"
-    "Pista de sector: {hint}\n\n"
-    "Reglas:\n"
-    "- Devuelve el dominio registrado (por ejemplo \"empresa.es\"), no una "
-    "subpágina ni una subdomain de marketplace.\n"
-    "- NO devuelvas redes sociales, directorios de empresas, marketplaces, "
-    "Google Maps, Wikipedia ni perfiles en plataformas de terceros.\n"
-    "- Si no estás seguro, devuelve domain vacío y confidence \"none\".\n"
-    "- No expliques: responde SOLO con JSON válido.\n\n"
-    "Formato exacto:\n"
-    "{{\"domain\": \"\", \"url\": \"\", \"confidence\": \"high|medium|low|none\","
-    " \"reason\": \"explicación breve\"}}"
-)
-
+# ---- shared helpers --------------------------------------------------------
 
 @dataclass
 class Resolution:
@@ -54,7 +37,7 @@ class Resolution:
     chosen_url: str = ""
     confidence: str = "none"
     reason: str = ""
-    provider: str = "openai_web_search"
+    provider: str = ""
     error: str = ""
 
 
@@ -78,7 +61,6 @@ def _slug(value: str) -> str:
 
 
 def _confidence_from_match(company: str, domain: str, model_confidence: str) -> str:
-    """Combine the model's self-confidence with a slug overlap heuristic."""
     if not domain:
         return "none"
     company_slug = _slug(company)
@@ -105,8 +87,27 @@ def _parse_json(text: str) -> Optional[dict]:
         return None
 
 
-def _openai_search(prompt: str, model: str) -> str:
-    """Call the OpenAI Responses API with the web_search tool. Returns text."""
+# ---- provider 1: OpenAI Responses + web_search -----------------------------
+
+OPENAI_PROMPT = (
+    "Encuentra el sitio web corporativo OFICIAL de la siguiente empresa "
+    "usando búsqueda web. No inventes dominios.\n\n"
+    "Empresa: {company}\n"
+    "Localización: {location}\n"
+    "Pista de sector: {hint}\n\n"
+    "Reglas:\n"
+    "- Devuelve el dominio registrado (\"empresa.es\"), no subpágina ni "
+    "subdomain de marketplace.\n"
+    "- NO redes sociales, directorios, marketplaces, Maps, Wikipedia ni "
+    "perfiles en plataformas de terceros.\n"
+    "- Si no estás seguro, domain vacío y confidence \"none\".\n"
+    "- Responde SOLO con JSON:\n"
+    "{{\"domain\": \"\", \"url\": \"\", \"confidence\": "
+    "\"high|medium|low|none\", \"reason\": \"explicación breve\"}}"
+)
+
+
+def _openai_search_call(prompt: str, model: str) -> str:
     from openai import OpenAI
 
     client = OpenAI(api_key=get_settings().openai_api_key)
@@ -118,7 +119,6 @@ def _openai_search(prompt: str, model: str) -> str:
     text = getattr(resp, "output_text", "") or ""
     if text:
         return text
-    # Fallback: walk the output blocks for any text content.
     chunks: List[str] = []
     for item in getattr(resp, "output", []) or []:
         for c in getattr(item, "content", []) or []:
@@ -128,33 +128,28 @@ def _openai_search(prompt: str, model: str) -> str:
     return "\n".join(chunks)
 
 
-def resolve_domain(
-    company_name: str,
-    location: str = "",
-    hint: str = "",
-    search_fn: Optional[Callable[[str, str], str]] = None,
+def _resolve_openai(
+    company: str,
+    location: str,
+    hint: str,
+    search_fn: Optional[Callable[[str, str], str]],
 ) -> Resolution:
-    """Resolve a corporate domain for a company using web search.
-
-    `search_fn(prompt, model) -> raw_text` can be injected for tests.
-    """
-    company = (company_name or "").strip()
-    if not company:
-        return Resolution(company_name="", query="", error="empty_company")
-
     settings = get_settings()
     query = f"{company} {location} {hint}".strip()
-    prompt = PROMPT_TEMPLATE.format(
+    prompt = OPENAI_PROMPT.format(
         company=company, location=location or "(sin dato)", hint=hint or "(sin dato)"
     )
-    fn = search_fn or (lambda p, m: _openai_search(p, m))
+    fn = search_fn or _openai_search_call
     model = settings.openai_search_model or settings.openai_model_fast
 
     try:
         text = fn(prompt, model)
-    except Exception as exc:  # noqa: BLE001 - SDK raises many types
-        logger.warning("Domain resolver failed for %s: %s", company, exc)
-        return Resolution(company_name=company, query=query, error=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Domain resolver (OpenAI) failed for %s: %s", company, exc)
+        return Resolution(
+            company_name=company, query=query, provider="openai_web_search",
+            error=str(exc),
+        )
 
     parsed = _parse_json(text) or {}
     raw_domain = str(parsed.get("domain", "") or "")
@@ -165,30 +160,197 @@ def resolve_domain(
     domain = _registered_domain(raw_domain or raw_url)
     if not domain or domain in BLOCKED_DOMAINS:
         return Resolution(
-            company_name=company,
-            query=query,
-            chosen_url=raw_url,
-            confidence="none",
+            company_name=company, query=query,
+            provider="openai_web_search",
+            chosen_url=raw_url, confidence="none",
             reason=reason or "blocked_or_empty_domain",
         )
-
-    confidence = _confidence_from_match(company, domain, model_conf)
     return Resolution(
-        company_name=company,
-        query=query,
-        chosen_domain=domain,
-        chosen_url=raw_url or f"https://{domain}",
-        confidence=confidence,
+        company_name=company, query=query,
+        provider="openai_web_search",
+        chosen_domain=domain, chosen_url=raw_url or f"https://{domain}",
+        confidence=_confidence_from_match(company, domain, model_conf),
         reason=reason,
     )
 
 
+# ---- provider 2: Brave Search + gpt-4o-mini classifier ---------------------
+
+BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
+
+
+def _brave_search_call(query: str) -> List[dict]:
+    settings = get_settings()
+    if not settings.brave_api_key:
+        raise RuntimeError("BRAVE_API_KEY no está configurada")
+    resp = httpx.get(
+        BRAVE_ENDPOINT,
+        params={"q": query, "count": 8, "country": settings.brave_country},
+        headers={
+            "Accept": "application/json",
+            "X-Subscription-Token": settings.brave_api_key,
+        },
+        timeout=settings.request_timeout,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("web", {}).get("results", []) or []
+
+
+BRAVE_CLASSIFY_PROMPT = (
+    "Tengo varios resultados de búsqueda para una empresa. Elige cuál es "
+    "el sitio web corporativo OFICIAL.\n\n"
+    "Empresa: {company}\n"
+    "Localización: {location}\n"
+    "Pista: {hint}\n\n"
+    "Resultados (filtrados, ya sin redes sociales ni directorios):\n"
+    "{results}\n\n"
+    "Reglas:\n"
+    "- Devuelve el dominio registrado (\"empresa.es\"), no subpágina.\n"
+    "- Si ninguno parece la web oficial corporativa, domain vacío y "
+    "confidence \"none\".\n"
+    "- Responde SOLO con JSON:\n"
+    "{{\"index\": <numero o null>, \"domain\": \"\", \"url\": \"\", "
+    "\"confidence\": \"high|medium|low|none\", "
+    "\"reason\": \"explicación breve\"}}"
+)
+
+
+def _brave_classify_call(prompt: str, model: str) -> str:
+    from openai import OpenAI
+
+    client = OpenAI(api_key=get_settings().openai_api_key)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+        response_format={"type": "json_object"},
+    )
+    return resp.choices[0].message.content or ""
+
+
+def _filter_brave_results(results: List[dict]) -> List[dict]:
+    out = []
+    seen: set[str] = set()
+    for r in results:
+        url = r.get("url") or r.get("href") or ""
+        dom = _registered_domain(url)
+        if not dom or dom in BLOCKED_DOMAINS or dom in seen:
+            continue
+        seen.add(dom)
+        out.append(
+            {
+                "domain": dom,
+                "url": url,
+                "title": r.get("title", ""),
+                "description": r.get("description", "") or r.get("snippet", ""),
+            }
+        )
+        if len(out) >= 5:
+            break
+    return out
+
+
+def _resolve_brave(
+    company: str,
+    location: str,
+    hint: str,
+    search_fn: Optional[Callable[[str], List[dict]]],
+    classify_fn: Optional[Callable[[str, str], str]],
+) -> Resolution:
+    settings = get_settings()
+    query = f"{company} {location} {hint}".strip()
+    search = search_fn or _brave_search_call
+    classify = classify_fn or _brave_classify_call
+
+    try:
+        raw_results = search(query)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Brave search failed for %s: %s", company, exc)
+        return Resolution(
+            company_name=company, query=query, provider="brave",
+            error=f"search:{exc}",
+        )
+
+    candidates = _filter_brave_results(raw_results)
+    if not candidates:
+        return Resolution(
+            company_name=company, query=query, provider="brave",
+            confidence="none", reason="sin_resultados_validos",
+        )
+
+    listing = "\n".join(
+        f"{i+1}. {c['title']} — {c['url']}\n   {c['description']}"
+        for i, c in enumerate(candidates)
+    )
+    prompt = BRAVE_CLASSIFY_PROMPT.format(
+        company=company,
+        location=location or "(sin dato)",
+        hint=hint or "(sin dato)",
+        results=listing,
+    )
+    model = settings.openai_search_model or settings.openai_model_fast
+
+    try:
+        text = classify(prompt, model)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Brave classifier failed for %s: %s", company, exc)
+        return Resolution(
+            company_name=company, query=query, provider="brave",
+            error=f"classify:{exc}",
+        )
+
+    parsed = _parse_json(text) or {}
+    index = parsed.get("index")
+    raw_domain = str(parsed.get("domain", "") or "")
+    raw_url = str(parsed.get("url", "") or "")
+    model_conf = str(parsed.get("confidence", "none") or "none").lower()
+    reason = str(parsed.get("reason", "") or "")
+
+    if not raw_domain and isinstance(index, int) and 1 <= index <= len(candidates):
+        raw_domain = candidates[index - 1]["domain"]
+        raw_url = raw_url or candidates[index - 1]["url"]
+
+    domain = _registered_domain(raw_domain or raw_url)
+    if not domain or domain in BLOCKED_DOMAINS:
+        return Resolution(
+            company_name=company, query=query, provider="brave",
+            chosen_url=raw_url, confidence="none",
+            reason=reason or "blocked_or_empty_domain",
+        )
+    return Resolution(
+        company_name=company, query=query, provider="brave",
+        chosen_domain=domain, chosen_url=raw_url or f"https://{domain}",
+        confidence=_confidence_from_match(company, domain, model_conf),
+        reason=reason,
+    )
+
+
+# ---- dispatcher + batch ----------------------------------------------------
+
+def resolve_domain(
+    company_name: str,
+    location: str = "",
+    hint: str = "",
+    provider: str = "openai",
+    search_fn: Optional[Callable] = None,
+    classify_fn: Optional[Callable] = None,
+) -> Resolution:
+    company = (company_name or "").strip()
+    if not company:
+        return Resolution(company_name="", query="", provider=provider, error="empty_company")
+    if provider == "brave":
+        return _resolve_brave(company, location, hint, search_fn, classify_fn)
+    return _resolve_openai(company, location, hint, search_fn)
+
+
 def resolve_missing_domains(
-    companies, progress_cb=None, search_fn: Optional[Callable] = None
+    companies,
+    progress_cb=None,
+    provider: str = "openai",
+    search_fn: Optional[Callable] = None,
+    classify_fn: Optional[Callable] = None,
 ) -> List[Resolution]:
-    """Mutate companies in place: for every company without a domain, run the
-    resolver and fill in the domain/website when confident enough.
-    """
     from .normalize import normalize_domain, normalize_website
 
     resolutions: List[Resolution] = []
@@ -199,13 +361,16 @@ def resolve_missing_domains(
                 progress_cb(idx, total)
             continue
         location = c.state_or_province or c.country
-        res = resolve_domain(c.company_name, location, c.industry_hint, search_fn=search_fn)
+        res = resolve_domain(
+            c.company_name, location, c.industry_hint,
+            provider=provider, search_fn=search_fn, classify_fn=classify_fn,
+        )
         resolutions.append(res)
         if res.chosen_domain and res.confidence in {"high", "medium"}:
             c.domain = normalize_domain(res.chosen_domain)
             if not c.website:
                 c.website = normalize_website("", c.domain)
-            tag = "resolved_via=openai_web_search"
+            tag = f"resolved_via={res.provider}"
             c.source = (c.source + " | " + tag).strip(" |")
         if progress_cb:
             progress_cb(idx, total)
