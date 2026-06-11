@@ -5,6 +5,7 @@ from typing import List
 from .candidate_generator import generate_candidates
 from .classifier import classify
 from .config import get_settings
+from .domain_resolver import Resolution, resolve_missing_domains
 from .email_extractor import extract_from_scrape
 from .models import Classification, Company, EnrichedEmail
 from .scoring import deterministic_decision, score_match
@@ -52,9 +53,14 @@ def run_pipeline(
     use_ai: bool,
     candidate_mode: str = "conservative",
     candidates_with_review: bool = False,
+    auto_resolve_domains: bool = False,
     scrape_progress=None,
     classify_progress=None,
-) -> tuple[List[EnrichedEmail], List[ScrapeResult]]:
+    resolve_progress=None,
+) -> tuple[List[EnrichedEmail], List[ScrapeResult], List[Resolution]]:
+    resolutions: List[Resolution] = []
+    if auto_resolve_domains and get_settings().openai_enabled:
+        resolutions = resolve_missing_domains(companies, progress_cb=resolve_progress)
     scrapes = scrape_companies(companies, progress_cb=scrape_progress)
 
     enriched: List[EnrichedEmail] = []
@@ -89,4 +95,4 @@ def run_pipeline(
         for cand in generate_candidates(company, candidate_mode):
             enriched.append(_enrich_match(cand, company, use_ai=False))
 
-    return enriched, scrapes
+    return enriched, scrapes, resolutions

@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model_fast: str = "gpt-5.4-mini"
     openai_model_strong: str = "gpt-5.4"
+    openai_search_model: str = "gpt-4o-mini"
     request_timeout: int = 15
     max_pages_per_domain: int = 8
     max_concurrent_requests: int = 5

@@ -44,6 +44,26 @@ La app es 100% local. No usa base de datos ni despliegue cloud.
    aceptado, siempre marcados como `must_verify` / `brevo_recommended=false`.
 9. Exporta CSVs y un directorio de auditoría.
 
+## Resolver dominios desconocidos (opcional)
+
+Si tu CSV trae filas con solo `company_name` (+ provincia/país) y sin
+`domain`/`website`, activa en la barra lateral **"Resolver dominios
+desconocidos con OpenAI Web Search"**. La app usa la herramienta de
+búsqueda web de OpenAI (API Responses, `web_search`) para encontrar el
+sitio oficial y rellenar el dominio antes de scrapear.
+
+- Solo se ejecuta para filas que no tienen dominio.
+- Filtra LinkedIn, Facebook, directorios, marketplaces, Google Maps,
+  Wikipedia, etc.
+- Solo rellena el dominio si la confianza es `high` o `medium`; en `low`
+  o `none` se registra la resolución pero el dominio queda vacío para que
+  lo revises a mano.
+- Genera `domain_resolutions.csv` en `outputs/run_.../` con la consulta,
+  el dominio elegido, la URL, la confianza y el motivo (auditoría).
+- Coste: cada resolución consume una llamada con `web_search` en OpenAI
+  (tarifa de OpenAI por consulta + tokens). Variable `OPENAI_SEARCH_MODEL`
+  en `.env`, por defecto `gpt-4o-mini`.
+
 ## Email público encontrado vs. candidato generado
 
 - **Email público encontrado**: aparece publicado en la web de la empresa

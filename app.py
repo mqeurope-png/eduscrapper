@@ -71,13 +71,31 @@ with st.sidebar:
         value=False,
     )
 
+    st.divider()
+    auto_resolve = st.checkbox(
+        "Resolver dominios desconocidos con OpenAI Web Search",
+        value=False,
+        disabled=not settings.openai_enabled,
+        help=(
+            "Para filas sin dominio: usa la búsqueda web de OpenAI para "
+            "encontrar la web oficial. Requiere OPENAI_API_KEY. Coste por "
+            "consulta según tarifa de OpenAI."
+        ),
+    )
+
     if st.session_state.get("last_run_dir"):
         st.success(
             f"Últimos resultados guardados en: "
             f"`{st.session_state['last_run_dir']}`"
         )
         if st.button("Limpiar resultados actuales", width="content"):
-            for k in ("enriched", "scrapes", "companies", "last_run_dir"):
+            for k in (
+                "enriched",
+                "scrapes",
+                "companies",
+                "resolutions",
+                "last_run_dir",
+            ):
                 st.session_state.pop(k, None)
             st.rerun()
 
@@ -166,6 +184,16 @@ with tab_enrich:
 
         if run_scrape or run_ai:
             use_ai = bool(run_ai)
+            _rp = None
+            if auto_resolve and settings.openai_enabled:
+                rbar = st.progress(0.0, text="Resolviendo dominios...")
+
+                def _rp(done: int, total: int) -> None:
+                    rbar.progress(
+                        done / max(total, 1),
+                        text=f"Resolviendo dominios {done}/{total}",
+                    )
+
             pbar = st.progress(0.0, text="Scraping...")
 
             def _sp(done: int, total: int) -> None:
@@ -178,13 +206,15 @@ with tab_enrich:
                     done / max(total, 1), text=f"Clasificando {done}/{total}"
                 )
 
-            enriched, scrapes = run_pipeline(
+            enriched, scrapes, resolutions = run_pipeline(
                 companies,
                 use_ai=use_ai,
                 candidate_mode=candidate_mode,
                 candidates_with_review=candidates_with_review,
+                auto_resolve_domains=auto_resolve,
                 scrape_progress=_sp,
                 classify_progress=_cp,
+                resolve_progress=_rp,
             )
 
             run_config = {
@@ -197,12 +227,16 @@ with tab_enrich:
                 "openai_enabled": settings.openai_enabled,
                 "candidate_mode": candidate_mode,
                 "candidates_with_review": candidates_with_review,
+                "auto_resolve_domains": auto_resolve,
             }
-            run_dir = write_run(enriched, companies, scrapes, run_config)
+            run_dir = write_run(
+                enriched, companies, scrapes, run_config, resolutions=resolutions
+            )
 
             st.session_state["enriched"] = enriched
             st.session_state["scrapes"] = scrapes
             st.session_state["companies"] = companies
+            st.session_state["resolutions"] = resolutions
             st.session_state["last_run_dir"] = str(run_dir)
             st.rerun()
 
@@ -218,6 +252,27 @@ with tab_enrich:
 
         frames = _operational_frames(enriched, companies, scrapes, False)
         n_cand = len(frames["emails_genericos_candidatos_no_confirmados.csv"])
+
+        resolutions = st.session_state.get("resolutions") or []
+        if resolutions:
+            st.header("Resolución de dominios")
+            r_done = sum(1 for r in resolutions if r.chosen_domain)
+            r_low = sum(1 for r in resolutions if r.chosen_domain and r.confidence == "low")
+            r_err = sum(1 for r in resolutions if r.error)
+            rc = st.columns(4)
+            rc[0].metric("Intentadas", len(resolutions))
+            rc[1].metric("Resueltas", r_done)
+            rc[2].metric("Baja confianza", r_low)
+            rc[3].metric("Errores", r_err)
+            from src.exporter import resolutions_frame
+            res_df = resolutions_frame(resolutions)
+            st.dataframe(res_df, height=200, width="stretch")
+            st.download_button(
+                "Descargar domain_resolutions.csv",
+                res_df.to_csv(index=False, encoding="utf-8-sig"),
+                file_name="domain_resolutions.csv",
+                mime="text/csv",
+            )
 
         st.header("Emails públicos")
         m = st.columns(5)

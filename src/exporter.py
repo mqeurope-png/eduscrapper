@@ -416,11 +416,30 @@ def mailercheck_file(
     return pd.DataFrame({"email": sorted(e for e in emails if e)})
 
 
+def resolutions_frame(resolutions) -> pd.DataFrame:
+    rows = []
+    for r in resolutions or []:
+        rows.append(
+            {
+                "company_name": r.company_name,
+                "query": r.query,
+                "chosen_domain": r.chosen_domain,
+                "chosen_url": r.chosen_url,
+                "confidence": r.confidence,
+                "reason": r.reason,
+                "provider": r.provider,
+                "error": r.error,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def write_run(
     enriched: List[EnrichedEmail],
     all_companies,
     scrapes: List[ScrapeResult],
     run_config: dict,
+    resolutions=None,
 ) -> Path:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = OUTPUTS_DIR / f"run_{stamp}"
@@ -461,6 +480,9 @@ def write_run(
         run_dir / "mailercheck_candidate_emails.csv",
         index=False,
         encoding="utf-8-sig",
+    )
+    resolutions_frame(resolutions).to_csv(
+        run_dir / "domain_resolutions.csv", index=False, encoding="utf-8-sig"
     )
     (run_dir / "run_config.json").write_text(
         json.dumps(run_config, indent=2, ensure_ascii=False), encoding="utf-8"
