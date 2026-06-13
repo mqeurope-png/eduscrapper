@@ -416,6 +416,69 @@ def mailercheck_file(
     return pd.DataFrame({"email": sorted(e for e in emails if e)})
 
 
+def create_run_dir() -> Path:
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = OUTPUTS_DIR / f"run_{stamp}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
+def flush_partial(
+    run_dir: Path,
+    resolutions=None,
+    scrapes=None,
+    enriched=None,
+    companies=None,
+    stage: str = "",
+) -> None:
+    """Write whatever partial state we have to disk. Safe to call anytime."""
+    try:
+        if resolutions is not None:
+            resolutions_frame(resolutions).to_csv(
+                run_dir / "domain_resolutions.csv",
+                index=False, encoding="utf-8-sig",
+            )
+        if scrapes is not None:
+            visited_urls_frame(scrapes).to_csv(
+                run_dir / "visited_urls.csv",
+                index=False, encoding="utf-8-sig",
+            )
+            errors_frame(scrapes).to_csv(
+                run_dir / "errors.csv",
+                index=False, encoding="utf-8-sig",
+            )
+        if enriched is not None:
+            raw_matches_frame(enriched).to_csv(
+                run_dir / "raw_email_matches.csv",
+                index=False, encoding="utf-8-sig",
+            )
+            for name, frame in build_frames(enriched).items():
+                frame.to_csv(run_dir / name, index=False, encoding="utf-8-sig")
+        if companies is not None:
+            pd.DataFrame(
+                [c.model_dump() for c in companies]
+            ).to_csv(
+                run_dir / "companies_state.csv",
+                index=False, encoding="utf-8-sig",
+            )
+        (run_dir / "_status.json").write_text(
+            json.dumps(
+                {
+                    "stage": stage,
+                    "updated_at": datetime.now().isoformat(timespec="seconds"),
+                    "resolutions": 0 if resolutions is None else len(resolutions),
+                    "scrapes": 0 if scrapes is None else len(scrapes),
+                    "enriched": 0 if enriched is None else len(enriched),
+                },
+                indent=2, ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
+        # Autosave is best-effort; never crash the pipeline because of it.
+        pass
+
+
 def resolutions_frame(resolutions) -> pd.DataFrame:
     rows = []
     for r in resolutions or []:
@@ -440,10 +503,12 @@ def write_run(
     scrapes: List[ScrapeResult],
     run_config: dict,
     resolutions=None,
+    run_dir: Path | None = None,
 ) -> Path:
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = OUTPUTS_DIR / f"run_{stamp}"
-    run_dir.mkdir(parents=True, exist_ok=True)
+    if run_dir is None:
+        run_dir = create_run_dir()
+    else:
+        run_dir.mkdir(parents=True, exist_ok=True)
 
     for name, frame in build_frames(enriched).items():
         frame.to_csv(run_dir / name, index=False, encoding="utf-8-sig")

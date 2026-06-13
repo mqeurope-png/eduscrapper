@@ -138,7 +138,10 @@ def scrape_company(company: Company, max_pages: int, timeout: int) -> ScrapeResu
     return result
 
 
-def scrape_companies(companies: List[Company], progress_cb=None) -> List[ScrapeResult]:
+def scrape_companies(
+    companies: List[Company], progress_cb=None, checkpoint_cb=None,
+    checkpoint_every: int = 50,
+) -> List[ScrapeResult]:
     settings = get_settings()
     results: List[ScrapeResult] = []
     total = len(companies)
@@ -156,4 +159,9 @@ def scrape_companies(companies: List[Company], progress_cb=None) -> List[ScrapeR
             results.append(future.result())
             if progress_cb:
                 progress_cb(idx, total)
+            if checkpoint_cb and (idx % checkpoint_every == 0 or idx == total):
+                try:
+                    checkpoint_cb(results)
+                except Exception:
+                    pass
     return results

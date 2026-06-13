@@ -350,6 +350,8 @@ def resolve_missing_domains(
     provider: str = "openai",
     search_fn: Optional[Callable] = None,
     classify_fn: Optional[Callable] = None,
+    checkpoint_cb=None,
+    checkpoint_every: int = 100,
 ) -> List[Resolution]:
     from .normalize import normalize_domain, normalize_website
 
@@ -374,4 +376,9 @@ def resolve_missing_domains(
             c.source = (c.source + " | " + tag).strip(" |")
         if progress_cb:
             progress_cb(idx, total)
+        if checkpoint_cb and (idx % checkpoint_every == 0 or idx == total):
+            try:
+                checkpoint_cb(resolutions, companies)
+            except Exception:
+                pass
     return resolutions

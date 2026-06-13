@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from typing import List
+from pathlib import Path
+from typing import List, Optional
 
 from .candidate_generator import generate_candidates
 from .classifier import classify
 from .config import get_settings
 from .domain_resolver import Resolution, resolve_missing_domains
 from .email_extractor import extract_from_scrape
+from .exporter import flush_partial
 from .models import Classification, Company, EnrichedEmail
 from .scoring import deterministic_decision, score_match
 from .scraper import ScrapeResult, scrape_companies
@@ -58,8 +60,17 @@ def run_pipeline(
     scrape_progress=None,
     classify_progress=None,
     resolve_progress=None,
+    run_dir: Optional[Path] = None,
 ) -> tuple[List[EnrichedEmail], List[ScrapeResult], List[Resolution]]:
     resolutions: List[Resolution] = []
+    resolver_ckpt = None
+    if run_dir is not None:
+        def resolver_ckpt(res_list, comps):
+            flush_partial(
+                run_dir, resolutions=res_list, companies=comps,
+                stage="resolving_domains",
+            )
+
     if auto_resolve_domains:
         s = get_settings()
         ok = s.openai_enabled and (
@@ -70,8 +81,20 @@ def run_pipeline(
                 companies,
                 progress_cb=resolve_progress,
                 provider=resolver_provider,
+                checkpoint_cb=resolver_ckpt,
             )
-    scrapes = scrape_companies(companies, progress_cb=scrape_progress)
+
+    scrape_ckpt = None
+    if run_dir is not None:
+        def scrape_ckpt(partial_scrapes):
+            flush_partial(
+                run_dir, resolutions=resolutions, scrapes=partial_scrapes,
+                stage="scraping",
+            )
+
+    scrapes = scrape_companies(
+        companies, progress_cb=scrape_progress, checkpoint_cb=scrape_ckpt,
+    )
 
     enriched: List[EnrichedEmail] = []
     companies_with_accepted_public: set[str] = set()
@@ -92,6 +115,11 @@ def run_pipeline(
                 companies_with_review_public.add(key)
         if classify_progress:
             classify_progress(idx, total)
+        if run_dir is not None and (idx % 50 == 0 or idx == total):
+            flush_partial(
+                run_dir, resolutions=resolutions, scrapes=scrapes,
+                enriched=enriched, stage="classifying",
+            )
 
     # Candidates: corporate domain, no accepted public email, and (unless the
     # user opted in) no public emails sitting in review for that company.

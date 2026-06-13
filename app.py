@@ -11,6 +11,7 @@ from src.exporter import (
     MailerCheckFormatError,
     brevo_pre_verification,
     build_frames,
+    create_run_dir,
     cross_mailercheck,
     mailercheck_candidate_emails,
     mailercheck_file,
@@ -216,6 +217,11 @@ with tab_enrich:
                     done / max(total, 1), text=f"Clasificando {done}/{total}"
                 )
 
+            run_dir = create_run_dir()
+            st.info(
+                f"Autosave activado. Resultados parciales en `{run_dir}` "
+                "cada ~50-100 empresas. Si la app cae, lo escrito sobrevive."
+            )
             enriched, scrapes, resolutions = run_pipeline(
                 companies,
                 use_ai=use_ai,
@@ -226,6 +232,7 @@ with tab_enrich:
                 scrape_progress=_sp,
                 classify_progress=_cp,
                 resolve_progress=_rp,
+                run_dir=run_dir,
             )
 
             run_config = {
@@ -242,7 +249,8 @@ with tab_enrich:
                 "resolver_provider": resolver_provider if auto_resolve else None,
             }
             run_dir = write_run(
-                enriched, companies, scrapes, run_config, resolutions=resolutions
+                enriched, companies, scrapes, run_config,
+                resolutions=resolutions, run_dir=run_dir,
             )
 
             st.session_state["enriched"] = enriched
