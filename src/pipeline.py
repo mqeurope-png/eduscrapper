@@ -107,8 +107,21 @@ def run_pipeline(
     cap = max(1, settings.max_emails_classified_per_company)
     total = len(scrapes)
     log = get_logger()
+    import time as _t
     for idx, scrape in enumerate(scrapes, start=1):
+        n_pages = len(scrape.pages)
+        html_kb = sum(len(p.html or "") for p in scrape.pages) / 1024
+        log.info(
+            "extract %d/%d company=%r pages=%d html=%dkb",
+            idx, total, scrape.company.company_name, n_pages, int(html_kb),
+        )
+        _t0 = _t.monotonic()
         matches = extract_from_scrape(scrape)
+        log.info(
+            "extract done %d/%d company=%r matches=%d elapsed=%.1fs",
+            idx, total, scrape.company.company_name, len(matches),
+            _t.monotonic() - _t0,
+        )
         # A page can dump dozens of emails (legal notices, staff lists, footer
         # widgets). Classifying every single one with OpenAI is slow and
         # rarely useful: prioritise contact/legal/privacy/about pages and the

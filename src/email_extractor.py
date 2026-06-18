@@ -124,24 +124,24 @@ def extract_from_scrape(scrape: ScrapeResult) -> List[EmailMatch]:
         if not page.text and not page.html:
             continue
         haystacks: list[tuple[str, str]] = []
-        # Decode HTML entities and fullwidth chars on both HTML and text so
-        # `info&#64;example.com` and `info＠example.com` become matchable.
-        html_decoded = _unobfuscate(page.html or "")
+        # Decode HTML entities and fullwidth chars on the *text* (which is
+        # cheaper than the full HTML). BeautifulSoup's get_text() already
+        # decodes standard entities like &#64; so `info&#64;example.com`
+        # becomes `info@example.com` in `page.text` -- we just normalise
+        # any leftover fullwidth / decimal-entity stragglers here.
         text = _unobfuscate(page.text or "")
-        if html_decoded:
+        # Only the targeted `mailto:` scan still runs against HTML, because
+        # mailto links live in href= attributes that get_text() strips. We
+        # do NOT regex the entire decoded HTML: on heavy pages (~1-5 MB of
+        # inline CSS / scripts / data URIs) it costs seconds per page and
+        # adds zero matches that the text scan didn't already find.
+        if page.html:
             for m in re.finditer(
                 r"mailto:([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,})",
-                html_decoded,
+                page.html,
                 re.IGNORECASE,
             ):
                 haystacks.append((_clean_email(m.group(1)), "mailto"))
-            # Some sites encode the @ but leave the rest readable. After
-            # decoding, scan the raw HTML too so footer/contact widgets caught
-            # by HTML but stripped by get_text() still surface.
-            for m in EMAIL_RE.finditer(html_decoded):
-                haystacks.append(
-                    (_clean_email(m.group(0)), "exact_public_email")
-                )
         for m in EMAIL_RE.finditer(text):
             haystacks.append((_clean_email(m.group(0)), "exact_public_email"))
         for m in OBFUSCATED_AT_RE.finditer(text):
