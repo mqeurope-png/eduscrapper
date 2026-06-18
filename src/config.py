@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     brave_api_key: str = ""
     brave_country: str = "ES"
     request_timeout: int = 15
-    max_pages_per_domain: int = 8
+    max_pages_per_domain: int = 14
     max_concurrent_requests: int = 5
 
     @property

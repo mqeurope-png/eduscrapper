@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html as html_lib
 import re
 from typing import List
 
@@ -15,17 +16,40 @@ EMAIL_RE = re.compile(
 )
 
 # info [at] dominio.com / info(at)dominio.com / info[@]dominio.com
+# Cover multi-language synonyms for @: at / arroba (es) / arobase (fr) /
+# chiocciola (it) / kukac (hu) / małpa (pl).
 OBFUSCATED_AT_RE = re.compile(
-    r"([A-Z0-9._%+\-]+)\s*[\(\[\{]?\s*(?:@|at|arroba)\s*[\)\]\}]?\s*"
+    r"([A-Z0-9._%+\-]+)\s*[\(\[\{]?\s*"
+    r"(?:@|at|arroba|arobase|chiocciola|kukac|malpa|małpa)"
+    r"\s*[\)\]\}]?\s*"
     r"([A-Z0-9.\-]+\.[A-Z]{2,})",
     re.IGNORECASE,
 )
 
-# info arroba dominio punto com
+# info arroba dominio punto com / info point/dot/punkt/ponto
 OBFUSCATED_WORDS_RE = re.compile(
-    r"([A-Z0-9._%+\-]+)\s+(?:arroba|at)\s+([A-Z0-9.\-]+)\s+(?:punto|dot)\s+([A-Z]{2,})",
+    r"([A-Z0-9._%+\-]+)\s+"
+    r"(?:arroba|at|arobase|chiocciola|kukac|malpa|małpa)"
+    r"\s+([A-Z0-9.\-]+)\s+"
+    r"(?:punto|dot|point|punkt|ponto)"
+    r"\s+([A-Z]{2,})",
     re.IGNORECASE,
 )
+
+# Normalise fullwidth and HTML-entity disguises before matching.
+# Examples handled:
+#   info&#64;example.com  -> info@example.com
+#   info&#x40;example.com -> info@example.com
+#   info&commat;example.com -> info@example.com
+#   info＠example.com     -> info@example.com  (fullwidth U+FF20)
+def _unobfuscate(text: str) -> str:
+    if not text:
+        return text
+    # Decode standard HTML entities (&#64;, &#x40;, &commat;, &amp;, etc.)
+    decoded = html_lib.unescape(text)
+    # Fullwidth signs sometimes used by Asian sites or to dodge regex.
+    decoded = decoded.replace("＠", "@").replace("．", ".")
+    return decoded
 
 _EXAMPLE_DOMAINS = {
     "example.com",
@@ -100,14 +124,24 @@ def extract_from_scrape(scrape: ScrapeResult) -> List[EmailMatch]:
         if not page.text and not page.html:
             continue
         haystacks: list[tuple[str, str]] = []
-        if page.html:
+        # Decode HTML entities and fullwidth chars on both HTML and text so
+        # `info&#64;example.com` and `info＠example.com` become matchable.
+        html_decoded = _unobfuscate(page.html or "")
+        text = _unobfuscate(page.text or "")
+        if html_decoded:
             for m in re.finditer(
                 r"mailto:([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,})",
-                page.html,
+                html_decoded,
                 re.IGNORECASE,
             ):
                 haystacks.append((_clean_email(m.group(1)), "mailto"))
-        text = page.text or ""
+            # Some sites encode the @ but leave the rest readable. After
+            # decoding, scan the raw HTML too so footer/contact widgets caught
+            # by HTML but stripped by get_text() still surface.
+            for m in EMAIL_RE.finditer(html_decoded):
+                haystacks.append(
+                    (_clean_email(m.group(0)), "exact_public_email")
+                )
         for m in EMAIL_RE.finditer(text):
             haystacks.append((_clean_email(m.group(0)), "exact_public_email"))
         for m in OBFUSCATED_AT_RE.finditer(text):
@@ -123,6 +157,9 @@ def extract_from_scrape(scrape: ScrapeResult) -> List[EmailMatch]:
             )
 
         context_lc = text.lower()
+        # Sort longer/more-specific candidates first so duplicates collapse
+        # (a mailto: match outranks the same email seen as plain text).
+        haystacks = list({(e, t): None for e, t in haystacks}.keys())
         for email, match_type in haystacks:
             if not email or "@" not in email:
                 continue
