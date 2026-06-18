@@ -18,8 +18,10 @@ class Settings(BaseSettings):
     brave_api_key: str = ""
     brave_country: str = "ES"
     request_timeout: int = 15
+    openai_request_timeout: int = 25
     max_pages_per_domain: int = 14
     max_concurrent_requests: int = 5
+    max_emails_classified_per_company: int = 8
 
     @property
     def openai_enabled(self) -> bool:

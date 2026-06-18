@@ -102,9 +102,33 @@ def run_pipeline(
     companies_with_accepted_public: set[str] = set()
     companies_with_review_public: set[str] = set()
 
+    settings = get_settings()
+    cap = max(1, settings.max_emails_classified_per_company)
     total = len(scrapes)
     for idx, scrape in enumerate(scrapes, start=1):
         matches = extract_from_scrape(scrape)
+        # A page can dump dozens of emails (legal notices, staff lists, footer
+        # widgets). Classifying every single one with OpenAI is slow and
+        # rarely useful: prioritise contact/legal/privacy/about pages and the
+        # most informative candidates so the obvious winners get scored
+        # while we don't burn the budget on the long tail.
+        target = (scrape.company.domain or "").lower()
+        page_rank = {"contact": 0, "legal": 1, "privacy": 1, "about": 2, "home": 3}
+
+        def _match_priority(m, target=target, page_rank=page_rank):
+            same_domain = 0 if (target and m.email_domain.lower() == target) else 1
+            local = m.email.split("@", 1)[0].lower()
+            generic_priority = (
+                0 if local in {"info", "contact", "contacto",
+                               "comercial", "ventas", "hola",
+                               "hello", "administracion"} else 1
+            )
+            page_priority = page_rank.get(m.page_type, 4)
+            return (same_domain, generic_priority, page_priority)
+
+        matches.sort(key=_match_priority)
+        if len(matches) > cap:
+            matches = matches[:cap]
         for match in matches:
             item = _enrich_match(match, scrape.company, use_ai)
             enriched.append(item)

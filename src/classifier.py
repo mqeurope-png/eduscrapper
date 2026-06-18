@@ -101,7 +101,14 @@ def classify(
 
     from openai import OpenAI
 
-    client = OpenAI(api_key=settings.openai_api_key)
+    # Hard cap so one slow API call doesn't freeze the whole pipeline. The
+    # default in the SDK is no timeout, which means a hung request blocks
+    # the classifier thread indefinitely.
+    client = OpenAI(
+        api_key=settings.openai_api_key,
+        timeout=settings.openai_request_timeout,
+        max_retries=1,
+    )
     model = _pick_model(match, deterministic_score)
     prompt = _build_prompt(match, website, province)
 
@@ -112,6 +119,7 @@ def classify(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
                 response_format={"type": "json_object"},
+                timeout=settings.openai_request_timeout,
             )
             content = resp.choices[0].message.content or ""
         except Exception as exc:  # noqa: BLE001 - SDK raises many error types
