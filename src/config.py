@@ -12,8 +12,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     openai_api_key: str = ""
-    openai_model_fast: str = "gpt-5.4-mini"
-    openai_model_strong: str = "gpt-5.4"
+    openai_model_fast: str = "gpt-4o-mini"
+    openai_model_strong: str = "gpt-4o"
     openai_search_model: str = "gpt-4o-mini"
     brave_api_key: str = ""
     brave_country: str = "ES"
