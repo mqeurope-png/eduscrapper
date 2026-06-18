@@ -179,6 +179,16 @@ def _resolve_openai(
 BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 
 
+# Brave's web search "country" parameter only accepts these market codes;
+# anything else returns HTTP 422 and the whole resolution falls to "none".
+# Source: https://api.search.brave.com/app/documentation/web-search/codes
+_BRAVE_SUPPORTED_COUNTRIES = {
+    "AR", "AU", "AT", "BE", "BR", "CA", "CL", "DK", "FI", "FR", "DE",
+    "HK", "IN", "ID", "IT", "JP", "KR", "MY", "MX", "NL", "NZ", "NO",
+    "CN", "PL", "PT", "PH", "RU", "SA", "ZA", "ES", "SE", "CH", "TW",
+    "TR", "GB", "US",
+}
+
 _COUNTRY_TO_BRAVE = {
     "spain": "ES", "españa": "ES", "espana": "ES",
     "portugal": "PT",
@@ -188,14 +198,7 @@ _COUNTRY_TO_BRAVE = {
     "netherlands": "NL", "holland": "NL",
     "belgium": "BE", "belgique": "BE",
     "united kingdom": "GB", "uk": "GB", "great britain": "GB", "england": "GB",
-    "ireland": "IE",
     "poland": "PL", "polska": "PL",
-    "czech republic": "CZ", "czechia": "CZ",
-    "slovakia": "SK", "slovensko": "SK",
-    "hungary": "HU", "magyarorszag": "HU", "magyarország": "HU",
-    "romania": "RO",
-    "bulgaria": "BG",
-    "greece": "GR",
     "turkey": "TR", "türkiye": "TR", "turkiye": "TR",
     "switzerland": "CH",
     "austria": "AT", "österreich": "AT", "osterreich": "AT",
@@ -203,25 +206,13 @@ _COUNTRY_TO_BRAVE = {
     "sweden": "SE",
     "norway": "NO",
     "finland": "FI",
-    "iceland": "IS",
-    "estonia": "EE",
-    "latvia": "LV",
-    "lithuania": "LT",
-    "slovenia": "SI",
-    "croatia": "HR",
-    "serbia": "RS",
-    "bosnia and herzegovina": "BA",
-    "montenegro": "ME",
-    "north macedonia": "MK", "macedonia": "MK",
-    "albania": "AL",
-    "ukraine": "UA",
     "russia": "RU",
     "united states of america": "US", "usa": "US", "united states": "US",
     "canada": "CA",
     "mexico": "MX", "méxico": "MX",
     "brazil": "BR", "brasil": "BR",
     "argentina": "AR",
-    "colombia": "CO",
+    "chile": "CL",
     "australia": "AU",
     "new zealand": "NZ",
     "south africa": "ZA",
@@ -229,31 +220,35 @@ _COUNTRY_TO_BRAVE = {
     "south korea": "KR", "korea": "KR",
     "people's republic of china": "CN", "china": "CN",
     "taiwan, china": "TW", "taiwan": "TW",
+    "hong kong": "HK",
     "india": "IN",
-    "united arab emirates": "AE",
+    "indonesia": "ID",
+    "malaysia": "MY",
+    "philippines": "PH",
     "saudi arabia": "SA",
-    "qatar": "QA",
-    "egypt": "EG",
-    "morocco": "MA",
-    "tunisia": "TN",
-    "algeria": "DZ",
-    "armenia": "AM",
-    "israel": "IL",
-    "pakistan": "PK",
-    "vietnam": "VN",
-    "bahrain": "BH",
-    "cyprus": "CY",
-    "kenya": "KE",
-    "ghana": "GH",
-    "uganda": "UG",
-    "guinea": "GN",
-    "monaco": "MC",
 }
 
 
 def _brave_country_for(country: str, fallback: str) -> str:
+    """Pick a Brave-supported country code or drop the filter.
+
+    Logic:
+      * If the company's country maps to a Brave-supported code -> use it.
+      * If the company HAS a country but Brave doesn't support it (UAE, LV,
+        RO, GR, RS, MA, CZ...), return empty so we DON'T filter by country;
+        forcing the ES default would bias the results to Spain.
+      * If the company has NO country at all, use the .env fallback (only
+        if Brave supports it). Otherwise empty.
+    """
     key = (country or "").strip().lower()
-    return _COUNTRY_TO_BRAVE.get(key, fallback)
+    if key:
+        code = _COUNTRY_TO_BRAVE.get(key)
+        if code and code in _BRAVE_SUPPORTED_COUNTRIES:
+            return code
+        return ""
+    if fallback and fallback.upper() in _BRAVE_SUPPORTED_COUNTRIES:
+        return fallback.upper()
+    return ""
 
 
 def _brave_search_call(query: str, country_code: str = "") -> List[dict]:

@@ -230,10 +230,18 @@ def scrape_company(company: Company, max_pages: int, timeout: int) -> ScrapeResu
         # 1) Home first — we need its HTML to discover real links.
         visit(client, base, "home")
 
+        # If the home didn't load OR returned no HTML (connection reset, DNS
+        # failure, anti-bot block, 4xx/5xx, non-html content), brute-forcing
+        # 40 more paths against the same dead host just wastes time and gets
+        # the same errors. Short-circuit.
+        home_ok = bool(result.pages and result.pages[0].html)
+        if not home_ok:
+            return result
+
         # 2) Follow real anchor links from the home that look like
         #    contact/about/legal in any language. This adapts to whatever URL
         #    scheme the site actually uses (e.g. /Kontakt.html, /en/contact).
-        home_html = result.pages[0].html if result.pages else ""
+        home_html = result.pages[0].html
         for url in _discover_paths(home_html, base):
             if len(result.pages) >= max_pages:
                 break
