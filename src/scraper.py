@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import List
 from urllib.parse import urljoin, urlparse
@@ -262,23 +262,42 @@ def scrape_companies(
     checkpoint_every: int = 200,
 ) -> List[ScrapeResult]:
     settings = get_settings()
-    results: List[ScrapeResult] = []
     total = len(companies)
+    # Pre-allocate so we can fill by submission index while reporting progress
+    # by *completion* order. Earlier code waited on future.result() in the
+    # original submission order, which meant a single slow site (timeout x
+    # several paths) blocked the progress bar even though dozens of futures
+    # behind it had already finished. The user sees that as "stuck at 119"
+    # while the worker threads keep emitting warnings.
+    results: List[ScrapeResult] = [
+        ScrapeResult(company=c) for c in companies
+    ]
+    completed = 0
     with ThreadPoolExecutor(max_workers=settings.max_concurrent_requests) as pool:
-        futures = [
+        future_to_idx = {
             pool.submit(
                 scrape_company,
                 c,
                 settings.max_pages_per_domain,
                 settings.request_timeout,
-            )
-            for c in companies
-        ]
-        for idx, future in enumerate(futures, start=1):
-            results.append(future.result())
+            ): i
+            for i, c in enumerate(companies)
+        }
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                results[idx] = future.result()
+            except Exception as exc:  # noqa: BLE001 - never let one site kill the run
+                logger.warning(
+                    "scrape_company crashed for %s: %s",
+                    companies[idx].company_name, exc,
+                )
+            completed += 1
             if progress_cb:
-                progress_cb(idx, total)
-            if checkpoint_cb and (idx % checkpoint_every == 0 or idx == total):
+                progress_cb(completed, total)
+            if checkpoint_cb and (
+                completed % checkpoint_every == 0 or completed == total
+            ):
                 try:
                     checkpoint_cb(results)
                 except Exception:
