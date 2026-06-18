@@ -9,6 +9,7 @@ from .config import get_settings
 from .domain_resolver import Resolution, resolve_missing_domains
 from .email_extractor import extract_from_scrape
 from .exporter import flush_partial
+from .logger import get_logger
 from .models import Classification, Company, EnrichedEmail
 from .scoring import deterministic_decision, score_match
 from .scraper import ScrapeResult, scrape_companies
@@ -105,6 +106,7 @@ def run_pipeline(
     settings = get_settings()
     cap = max(1, settings.max_emails_classified_per_company)
     total = len(scrapes)
+    log = get_logger()
     for idx, scrape in enumerate(scrapes, start=1):
         matches = extract_from_scrape(scrape)
         # A page can dump dozens of emails (legal notices, staff lists, footer
@@ -129,7 +131,20 @@ def run_pipeline(
         matches.sort(key=_match_priority)
         if len(matches) > cap:
             matches = matches[:cap]
-        for match in matches:
+        n_to_classify = sum(
+            1 for m in matches if m.match_type != "generated_candidate"
+        )
+        log.info(
+            "scrape %d/%d company=%r matches=%d (will classify %d)",
+            idx, total, scrape.company.company_name, len(matches), n_to_classify,
+        )
+        for m_idx, match in enumerate(matches, start=1):
+            if classify_progress and use_ai:
+                # Surface intra-company progress so the UI doesn't look frozen
+                # when one company has 8 emails and each takes 5-10s.
+                classify_progress(
+                    idx - 1 + (m_idx - 1) / max(len(matches), 1), total,
+                )
             item = _enrich_match(match, scrape.company, use_ai)
             enriched.append(item)
             if match.match_type == "generated_candidate":

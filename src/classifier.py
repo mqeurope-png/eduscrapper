@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Optional
 
 from pydantic import ValidationError
@@ -106,24 +107,37 @@ def classify(
     # the classifier thread indefinitely.
     client = OpenAI(
         api_key=settings.openai_api_key,
-        timeout=settings.openai_request_timeout,
+        timeout=float(settings.openai_request_timeout),
         max_retries=1,
     )
     model = _pick_model(match, deterministic_score)
     prompt = _build_prompt(match, website, province)
 
     for attempt in range(2):
+        started = time.monotonic()
+        logger.info(
+            "classify start model=%s email=%s page=%s attempt=%d",
+            model, match.email, match.page_type, attempt + 1,
+        )
         try:
             resp = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
                 response_format={"type": "json_object"},
-                timeout=settings.openai_request_timeout,
+                timeout=float(settings.openai_request_timeout),
             )
             content = resp.choices[0].message.content or ""
+            elapsed = time.monotonic() - started
+            logger.info(
+                "classify done  email=%s elapsed=%.1fs", match.email, elapsed,
+            )
         except Exception as exc:  # noqa: BLE001 - SDK raises many error types
-            logger.error("OpenAI call failed (%s): %s", model, exc)
+            elapsed = time.monotonic() - started
+            logger.error(
+                "classify FAIL  email=%s elapsed=%.1fs model=%s err=%s",
+                match.email, elapsed, model, exc,
+            )
             return None
         parsed = _parse(content)
         if parsed is not None:
