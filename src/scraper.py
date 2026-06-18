@@ -140,7 +140,7 @@ def scrape_company(company: Company, max_pages: int, timeout: int) -> ScrapeResu
 
 def scrape_companies(
     companies: List[Company], progress_cb=None, checkpoint_cb=None,
-    checkpoint_every: int = 50,
+    checkpoint_every: int = 200,
 ) -> List[ScrapeResult]:
     settings = get_settings()
     results: List[ScrapeResult] = []

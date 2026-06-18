@@ -54,6 +54,14 @@ with st.sidebar:
     only_domain = st.checkbox("Solo filas con dominio", value=True)
     only_high = st.checkbox("Solo prioridad Alta", value=False)
     dedupe = st.checkbox("Deduplicar por dominio + empresa", value=True)
+    checkpoint_every = st.number_input(
+        "Guardar copia parcial cada N empresas",
+        min_value=10, max_value=2000, value=200, step=50,
+        help=(
+            "Cadencia del autosave: si el proceso se corta (cierre, error, "
+            "timeout), lo escrito hasta el último checkpoint queda en disco."
+        ),
+    )
     settings.max_pages_per_domain = int(max_pages)
 
     st.divider()
@@ -220,7 +228,8 @@ with tab_enrich:
             run_dir = create_run_dir()
             st.info(
                 f"Autosave activado. Resultados parciales en `{run_dir}` "
-                "cada ~50-100 empresas. Si la app cae, lo escrito sobrevive."
+                f"cada {int(checkpoint_every)} empresas. "
+                "Si la app cae, lo escrito sobrevive."
             )
             enriched, scrapes, resolutions = run_pipeline(
                 companies,
@@ -233,6 +242,7 @@ with tab_enrich:
                 classify_progress=_cp,
                 resolve_progress=_rp,
                 run_dir=run_dir,
+                checkpoint_every=int(checkpoint_every),
             )
 
             run_config = {

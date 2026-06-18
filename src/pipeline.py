@@ -61,6 +61,7 @@ def run_pipeline(
     classify_progress=None,
     resolve_progress=None,
     run_dir: Optional[Path] = None,
+    checkpoint_every: int = 200,
 ) -> tuple[List[EnrichedEmail], List[ScrapeResult], List[Resolution]]:
     resolutions: List[Resolution] = []
     resolver_ckpt = None
@@ -94,6 +95,7 @@ def run_pipeline(
 
     scrapes = scrape_companies(
         companies, progress_cb=scrape_progress, checkpoint_cb=scrape_ckpt,
+        checkpoint_every=checkpoint_every,
     )
 
     enriched: List[EnrichedEmail] = []
@@ -115,7 +117,7 @@ def run_pipeline(
                 companies_with_review_public.add(key)
         if classify_progress:
             classify_progress(idx, total)
-        if run_dir is not None and (idx % 50 == 0 or idx == total):
+        if run_dir is not None and (idx % checkpoint_every == 0 or idx == total):
             flush_partial(
                 run_dir, resolutions=resolutions, scrapes=scrapes,
                 enriched=enriched, stage="classifying",
