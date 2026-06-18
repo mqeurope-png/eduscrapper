@@ -179,13 +179,94 @@ def _resolve_openai(
 BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 
 
-def _brave_search_call(query: str) -> List[dict]:
+_COUNTRY_TO_BRAVE = {
+    "spain": "ES", "españa": "ES", "espana": "ES",
+    "portugal": "PT",
+    "france": "FR",
+    "germany": "DE", "deutschland": "DE",
+    "italy": "IT", "italia": "IT",
+    "netherlands": "NL", "holland": "NL",
+    "belgium": "BE", "belgique": "BE",
+    "united kingdom": "GB", "uk": "GB", "great britain": "GB", "england": "GB",
+    "ireland": "IE",
+    "poland": "PL", "polska": "PL",
+    "czech republic": "CZ", "czechia": "CZ",
+    "slovakia": "SK", "slovensko": "SK",
+    "hungary": "HU", "magyarorszag": "HU", "magyarország": "HU",
+    "romania": "RO",
+    "bulgaria": "BG",
+    "greece": "GR",
+    "turkey": "TR", "türkiye": "TR", "turkiye": "TR",
+    "switzerland": "CH",
+    "austria": "AT", "österreich": "AT", "osterreich": "AT",
+    "denmark": "DK",
+    "sweden": "SE",
+    "norway": "NO",
+    "finland": "FI",
+    "iceland": "IS",
+    "estonia": "EE",
+    "latvia": "LV",
+    "lithuania": "LT",
+    "slovenia": "SI",
+    "croatia": "HR",
+    "serbia": "RS",
+    "bosnia and herzegovina": "BA",
+    "montenegro": "ME",
+    "north macedonia": "MK", "macedonia": "MK",
+    "albania": "AL",
+    "ukraine": "UA",
+    "russia": "RU",
+    "united states of america": "US", "usa": "US", "united states": "US",
+    "canada": "CA",
+    "mexico": "MX", "méxico": "MX",
+    "brazil": "BR", "brasil": "BR",
+    "argentina": "AR",
+    "colombia": "CO",
+    "australia": "AU",
+    "new zealand": "NZ",
+    "south africa": "ZA",
+    "japan": "JP",
+    "south korea": "KR", "korea": "KR",
+    "people's republic of china": "CN", "china": "CN",
+    "taiwan, china": "TW", "taiwan": "TW",
+    "india": "IN",
+    "united arab emirates": "AE",
+    "saudi arabia": "SA",
+    "qatar": "QA",
+    "egypt": "EG",
+    "morocco": "MA",
+    "tunisia": "TN",
+    "algeria": "DZ",
+    "armenia": "AM",
+    "israel": "IL",
+    "pakistan": "PK",
+    "vietnam": "VN",
+    "bahrain": "BH",
+    "cyprus": "CY",
+    "kenya": "KE",
+    "ghana": "GH",
+    "uganda": "UG",
+    "guinea": "GN",
+    "monaco": "MC",
+}
+
+
+def _brave_country_for(country: str, fallback: str) -> str:
+    key = (country or "").strip().lower()
+    return _COUNTRY_TO_BRAVE.get(key, fallback)
+
+
+def _brave_search_call(query: str, country_code: str = "") -> List[dict]:
     settings = get_settings()
     if not settings.brave_api_key:
         raise RuntimeError("BRAVE_API_KEY no está configurada")
+    params = {"q": query, "count": 15}
+    cc = country_code or settings.brave_country
+    if cc:
+        params["country"] = cc
     resp = httpx.get(
         BRAVE_ENDPOINT,
-        params={"q": query, "count": 8, "country": settings.brave_country},
+        params=params,
         headers={
             "Accept": "application/json",
             "X-Subscription-Token": settings.brave_api_key,
@@ -202,11 +283,21 @@ BRAVE_CLASSIFY_PROMPT = (
     "el sitio web corporativo OFICIAL.\n\n"
     "Empresa: {company}\n"
     "Localización: {location}\n"
-    "Pista: {hint}\n\n"
+    "Sector (contexto, NO criterio): {hint}\n\n"
     "Resultados (filtrados, ya sin redes sociales ni directorios):\n"
     "{results}\n\n"
-    "Reglas:\n"
+    "Reglas de decisión:\n"
+    "- Si el TÍTULO o la URL contienen el nombre de la empresa o una "
+    "variante reconocible (incluyendo acrónimos: p. ej. 'rapidcc.es' "
+    "para 'Rapid Centro Color', 'gmgcolor.com' para 'GMG Color'), es "
+    "evidencia FUERTE de web oficial → confidence high.\n"
+    "- Si solo el snippet/descripción la menciona pero no el título ni "
+    "la URL, confidence medium.\n"
     "- Devuelve el dominio registrado (\"empresa.es\"), no subpágina.\n"
+    "- NO selecciones marketplaces (alibaba, made-in-china), directorios "
+    "(pappers, einforma, kompass, dnb, paginas-amarillas), agregadores "
+    "de eventos (eventseye, 10times), agencias generalistas ni "
+    "perfiles en plataformas de terceros.\n"
     "- Si ninguno parece la web oficial corporativa, domain vacío y "
     "confidence \"none\".\n"
     "- Responde SOLO con JSON:\n"
@@ -246,7 +337,7 @@ def _filter_brave_results(results: List[dict]) -> List[dict]:
                 "description": r.get("description", "") or r.get("snippet", ""),
             }
         )
-        if len(out) >= 5:
+        if len(out) >= 8:
             break
     return out
 
@@ -259,12 +350,21 @@ def _resolve_brave(
     classify_fn: Optional[Callable[[str, str], str]],
 ) -> Resolution:
     settings = get_settings()
-    query = f"{company} {location} {hint}".strip()
+    # Brave query: only the company + a short location word. The industry hint
+    # is generic ("print, signage, large-format, ...") and pollutes the search
+    # so we keep it ONLY as context for the GPT classifier below.
+    brave_query = f"{company} {location}".strip() if location else company
+    query = f"{company} {location} {hint}".strip()  # for the audit log
     search = search_fn or _brave_search_call
     classify = classify_fn or _brave_classify_call
+    country_code = _brave_country_for(location, settings.brave_country)
 
     try:
-        raw_results = search(query)
+        # Older injected search_fn callers may not accept the country kwarg.
+        try:
+            raw_results = search(brave_query, country_code)  # type: ignore[call-arg]
+        except TypeError:
+            raw_results = search(brave_query)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Brave search failed for %s: %s", company, exc)
         return Resolution(
